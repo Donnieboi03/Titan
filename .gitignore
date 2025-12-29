@@ -1,0 +1,6 @@
+# .env files
+.env
+
+# log giles
+.log
+logs/
