@@ -4,3 +4,10 @@
 # log giles
 .log
 logs/
+
+# temp files
+*temp*
+*tmp*
+
+# build files
+build/

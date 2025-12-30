@@ -1,64 +1,55 @@
 #pragma once
-#include <vector>
-#include <iostream>
-
-// Order Book
-class PriceHeap
+#include "OrderEngine.cpp"
+struct PriceHeap
 {
-public:
-    PriceHeap()
-    : heap(0), min(true)
+    PriceHeap() noexcept
+    : min_(true)
     {
+        heap_.reserve(RESERVED_SIZE);
     }
 
-    PriceHeap(const bool _min)
-    : heap(0), min(_min)
+    PriceHeap(const bool min) noexcept
+    : min_(min)
     {
+        heap_.reserve(RESERVED_SIZE);
     }
 
-    void push(const double data)
+    void push(Price data) noexcept
     {
-        heap.push_back(data);
-        heapify_up(heap.size() - 1);
+        heap_.push_back(data);
+        heapify_up(heap_.size() - 1);
     }
 
-    void pop(const int index = 0)
+    void pop(const int index = 0) noexcept
     {
-            if (!heap.size()) 
-                return;
-            std::swap(heap[index], heap[heap.size() - 1]);
-            heap.pop_back();
+            if (!heap_.size()) return;
+            std::swap(heap_[index], heap_[heap_.size() - 1]);
+            heap_.pop_back();
             heapify_down(index);
     }
 
-    double peek() const 
-    { 
-        if (!heap.size()) 
-            return -1;
-        return heap[0]; 
-    }
+    double peek() const noexcept
+    { return heap_[0]; }
 
-    double at(const int index) const
-    {
-        if (!heap.size()) 
-            return -1;
-        return heap[index]; 
-    }
+    double at(const int index) const noexcept
+    { return heap_[index]; }
 
-    int find(double data) const
+    int find(Price data) const noexcept
     {
-        for (int i = 0; i < heap.size(); i++)
+        for (int i = 0; i < heap_.size(); i++)
         {
-            if (heap[i] == data) return i;
+            if (heap_[i] == data) return i;
         }  
         return -1;
     }
 
-    int size() const { return heap.size(); }
+    int size() const noexcept 
+    { return heap_.size(); }
 
 private:
-    std::vector<double> heap;
-    const bool min;
+    std::vector<Price> heap_; // Heap 
+    const bool min_; // Flag for Min or Max Heap
+    static constexpr std::size_t RESERVED_SIZE = sizeof(Price) * 32; // Default Heap Size
 
     // For Pushing from the End
     void heapify_up(int index)
@@ -66,9 +57,9 @@ private:
         while (index > 0)
         {
             int parent = (index - 1) / 2;
-            if (min && heap[index] >= heap[parent]) break;
-            else if (!min && heap[index] <= heap[parent]) break;
-            std::swap(heap[index], heap[parent]);
+            if (min_ && heap_[index] >= heap_[parent]) break;
+            else if (!min_ && heap_[index] <= heap_[parent]) break;
+            std::swap(heap_[index], heap_[parent]);
             index = parent;
         }
     }
@@ -76,23 +67,23 @@ private:
     // For Popping from Front
     void heapify_down(int index)
     {
-        while (index < heap.size())
+        while (index < heap_.size())
         {
-            int left_child = (index * 2) + 1 < heap.size() ? (index * 2) + 1 : index;
-            int right_child = (index * 2) + 2 < heap.size() ? (index * 2) + 2 : index;
+            int left_child = (index * 2) + 1 < heap_.size() ? (index * 2) + 1 : index;
+            int right_child = (index * 2) + 2 < heap_.size() ? (index * 2) + 2 : index;
             int best_child = index;
 
-            if (left_child < heap.size()) 
+            if (left_child < heap_.size()) 
             {
-                if ((min && heap[left_child] < heap[best_child]) || (!min && heap[left_child] > heap[best_child])) 
+                if ((min_ && heap_[left_child] < heap_[best_child]) || (!min_ && heap_[left_child] > heap_[best_child])) 
                 {
                     best_child = left_child;
                 }
             }
 
-            if (right_child < heap.size()) 
+            if (right_child < heap_.size()) 
             {
-                if ((min && heap[right_child] < heap[best_child]) || (!min && heap[right_child] > heap[best_child])) 
+                if ((min_ && heap_[right_child] < heap_[best_child]) || (!min_ && heap_[right_child] > heap_[best_child])) 
                 {
                     best_child = right_child;
                 }
@@ -100,7 +91,7 @@ private:
             
             if (best_child == index) break;
 
-            std::swap(heap[index], heap[best_child]);
+            std::swap(heap_[index], heap_[best_child]);
             index = best_child;
         }
     }
