@@ -11,3 +11,14 @@ logs/
 
 # build files
 build/
+
+# test files
+test/
+
+# debug symbol files
+*.dSYM
+**/*.dSYM/
+
+# vscode files
+.vscode/
+

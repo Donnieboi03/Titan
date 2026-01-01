@@ -1,6 +1,5 @@
 #pragma once
-#include "OrderEngine.cpp"
-
+#include <vector>
 template <typename T>
 struct Arena
 {
@@ -14,6 +13,7 @@ struct Arena
 
     Index allocate(T&& value) noexcept
     {
+        // Check if we can reuse a free slot
         if (!free_.empty())
         {
             Index idx = free_.back();
@@ -22,9 +22,34 @@ struct Arena
             return idx;
         }
         
+        // Check if we have space to add a new element
+        if (data_.size() >= data_.capacity())
+            return -1;
+        
         data_.push_back(std::move(value));
         return static_cast<Index>(data_.size() - 1);
     }
+
+    template <typename... Args>
+    Index emplace(Args&&... args) noexcept
+    {
+        // Check if we can reuse a free slot
+        if (!free_.empty())
+        {
+            Index idx = free_.back();
+            free_.pop_back();
+            data_[idx] = T(std::forward<Args>(args)...);
+            return idx;
+        }
+        
+        // Check if we have space to add a new element
+        if (data_.size() >= data_.capacity())
+            return -1;
+        
+        data_.emplace_back(std::forward<Args>(args)...);
+        return static_cast<Index>(data_.size() - 1);
+    }
+
 
     void free(Index idx) noexcept
     {
