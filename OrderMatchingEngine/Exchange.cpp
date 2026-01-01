@@ -6,16 +6,12 @@ using OrderEngines = std::unordered_map<std::string, std::shared_ptr<OrderEngine
 class Exchange
 {
     public:
-        Exchange(bool _verbose = true)
-        : verbose(_verbose)
+        Exchange(std::size_t default_capacity = 100000, bool _verbose = true)
+        : default_capacity_(default_capacity), verbose(_verbose)
         { 
         }
         
-        ~Exchange()
-        {
-        }
-
-        bool initialize_stock(const std::string& _ticker, double _ipo_price, double _ipo_qty)
+        bool initialize_stock(const std::string& _ticker, Price _ipo_price, Quantity _ipo_qty, std::size_t capacity = 0)
         {
             try
             {
@@ -26,14 +22,16 @@ class Exchange
                 if (StockExchange.find(_ticker) != StockExchange.end())
                     throw std::runtime_error("Stock Already Exist");
 
-                auto engine = std::make_shared<OrderEngine>(std::move(_ticker), verbose); // verbose mode
+                // Use provided capacity or default
+                std::size_t engine_capacity = capacity > 0 ? capacity : default_capacity_;
+                auto engine = std::make_shared<OrderEngine>(_ticker, engine_capacity, verbose);
                 if (!engine)
                     throw std::runtime_error("Null Matching Engine");
 
                 // Place initial sell at IPO Price and IPO Quantitiy
-                auto ipo_order = engine->place_order(OrderSide::ASK, OrderType::LIMIT, _ipo_price, _ipo_qty);
-                // If no Order then error
-                if (!ipo_order)
+                OrderId ipo_order = engine->place_order(OrderSide::ASK, OrderType::LIMIT, _ipo_price, _ipo_qty);
+                // If no Order then error (check for -1 instead of !ipo_order)
+                if (ipo_order == static_cast<OrderId>(-1))
                     throw std::runtime_error("IPO Order Failed to Place");
                 StockExchange.emplace(_ticker, std::move(engine));
                 return true;
@@ -46,7 +44,7 @@ class Exchange
             }
         }
 
-        unsigned int limit_order(const std::string& _ticker, OrderSide _side, double _price, double _qty) const
+        OrderId limit_order(const std::string& _ticker, OrderSide _side, Price _price, Quantity _qty) const
         {
             try
             {
@@ -56,9 +54,9 @@ class Exchange
                 if (_price <= 0 || _qty <= 0)
                     throw std::runtime_error("Price/Quantity must be > 0");
                 
-                auto order = StockExchange.at(_ticker)->place_order(_side, OrderType::LIMIT, _price, _qty);
-                // If no Order then error
-                if (!order)
+                OrderId order = StockExchange.at(_ticker)->place_order(_side, OrderType::LIMIT, _price, _qty);
+                // If no Order then error (check for -1 for failure)
+                if (order == static_cast<OrderId>(-1))
                     throw std::runtime_error("Order Failed to Place");
                 return order;
             }
@@ -66,11 +64,11 @@ class Exchange
             {
                if (verbose)
                 std::cerr << "Place Order Error: " << e.what() << '\n';
-                return 0;
+                return static_cast<OrderId>(-1);
             }
         }
 
-        unsigned int market_order(const std::string& _ticker, OrderSide _side, double _qty) const
+        OrderId market_order(const std::string& _ticker, OrderSide _side, Quantity _qty) const
         {
             try
             {
@@ -80,9 +78,9 @@ class Exchange
                 if (_qty <= 0)
                     throw std::runtime_error("Price/Quantity must be > 0");
                 
-                auto order = StockExchange.at(_ticker)->place_order(_side, OrderType::MARKET, -1, _qty);
-                // If no Order then error
-                if (!order)
+                OrderId order = StockExchange.at(_ticker)->place_order(_side, OrderType::MARKET, -1, _qty);
+                // If no Order then error (check for -1 for failure)
+                if (order == static_cast<OrderId>(-1))
                     throw std::runtime_error("Order Failed to Place");
                 return order;
             }
@@ -90,11 +88,11 @@ class Exchange
             {
                 if (verbose)
                     std::cerr << "Place Order Error: " << e.what() << '\n';
-                return 0;
+                return static_cast<OrderId>(-1);
             }
         }
 
-        bool cancel_order(const std::string& _ticker, unsigned int order_id) const
+        bool cancel_order(const std::string& _ticker, OrderId order_id) const
         {
             try
             {
@@ -115,16 +113,16 @@ class Exchange
             }
         }
 
-        unsigned int edit_order(const std::string& _ticker, unsigned int order_id, OrderSide _side, double _price, double _qty) const
+        OrderId edit_order(const std::string& _ticker, OrderId order_id, OrderSide _side, Price _price, Quantity _qty) const
         {
             try
             {
                 if (StockExchange.find(_ticker) == StockExchange.end()) 
                     throw std::runtime_error("Stock Does Not Exist");
                 
-                auto order = StockExchange.at(_ticker)->edit_order(order_id, _side, _price, _qty);
-                // If no Order then error
-                if (!order)
+                OrderId order = StockExchange.at(_ticker)->edit_order(order_id, _side, _price, _qty);
+                // If no Order then error (check for -1 for failure)
+                if (order == static_cast<OrderId>(-1))
                     throw std::runtime_error("Order Failed to Edit");
                 return order;
             }
@@ -132,11 +130,11 @@ class Exchange
             {
                 if (verbose)
                     std::cerr << "Edit Order Error: " << e.what() << '\n';
-                return 0;
+                return static_cast<OrderId>(-1);
             }
         }
 
-        std::shared_ptr<OrderInfo> get_order(const std::string& _ticker, unsigned int order_id) const
+        const OrderInfo* get_order(const std::string& _ticker, OrderId order_id) const
         {
             try
             {
@@ -157,7 +155,8 @@ class Exchange
             }
         }
 
-        double get_price(const std::string& _ticker) const
+        // GET: Average Price
+        Price get_price(const std::string& _ticker) const
         {
             try
             {
@@ -174,7 +173,7 @@ class Exchange
             }
         }
 
-        double get_best_bid(const std::string& _ticker) const
+        Price get_best_bid(const std::string& _ticker) const
         {
             try
             {
@@ -195,7 +194,7 @@ class Exchange
             }
         }
 
-        double get_best_ask(const std::string& _ticker) const
+        Price get_best_ask(const std::string& _ticker) const
         {
             try
             {
@@ -216,7 +215,7 @@ class Exchange
             }
         }
 
-        std::vector<std::shared_ptr<OrderInfo>> get_orders_by_status(const std::string& _ticker, OrderStatus status) const
+        std::vector<OrderInfo> get_orders_by_status(const std::string& _ticker, OrderStatus status) const
         {
             try
             {
@@ -232,7 +231,7 @@ class Exchange
             }
         }
 
-        std::vector<std::pair<double, std::size_t>> get_market_depth(const std::string& _ticker, OrderSide _side, std::size_t depth = 10) const
+        std::vector<std::pair<Price, Quantity>> get_market_depth(const std::string& _ticker, OrderSide _side, std::size_t depth = 10) const
         {
             try
             {
@@ -277,5 +276,6 @@ class Exchange
 
     private:
         OrderEngines StockExchange;
+        std::size_t default_capacity_; // Default capacity for new OrderEngines
         bool verbose; // Verbose Mode
 };
