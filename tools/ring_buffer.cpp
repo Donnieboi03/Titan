@@ -4,6 +4,11 @@
 template <typename T>
 struct RingBuffer 
 {
+private:
+    static constexpr std::size_t ELEMENTS_PER_LINE = 64 / sizeof(T); // L1 Cache Line Size
+    static constexpr std::size_t RESERVED_SIZE = ELEMENTS_PER_LINE * 512; // Default Buffer Size
+
+public:
     RingBuffer() noexcept
     : head_(0)
     {
@@ -24,8 +29,6 @@ struct RingBuffer
 private:
     std::vector<T> q_; // Ring-Buffer
     std::size_t head_; // Current Head
-    static constexpr std::size_t ELEMENTS_PER_LINE = 64 / sizeof(T); // L1 Cache Line Size
-    static constexpr std::size_t RESERVED_SIZE = ELEMENTS_PER_LINE * 4; // Default Buffer Size
 
     void maybe_compact() 
     {
