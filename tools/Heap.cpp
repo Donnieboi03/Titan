@@ -10,6 +10,11 @@ enum class HeapType
 template <typename T, HeapType TYPE = HeapType::MIN>
 struct Heap
 {
+private:
+    static constexpr std::size_t ELEMENTS_PER_LINE = 64 / sizeof(T); // L1 Cache Line Size
+    static constexpr std::size_t RESERVED_SIZE = ELEMENTS_PER_LINE * 128; // Default Buffer Size
+
+public:
     Heap() noexcept
     {
         heap_.reserve(RESERVED_SIZE);
@@ -52,7 +57,6 @@ struct Heap
 
 private:
     std::vector<T> heap_;
-    static constexpr std::size_t RESERVED_SIZE = sizeof(T) * 32;
 
     // For Pushing from the End
     void heapify_up(int idx)

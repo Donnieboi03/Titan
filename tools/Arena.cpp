@@ -18,6 +18,7 @@ struct Arena
         {
             Index idx = free_.back();
             free_.pop_back();
+            // Reuse existing slot by move-assigning new value over old one
             data_[idx] = std::move(value);
             return idx;
         }
@@ -50,7 +51,6 @@ struct Arena
         return static_cast<Index>(data_.size() - 1);
     }
 
-
     void free(Index idx) noexcept
     {
         free_.push_back(idx);
@@ -66,10 +66,13 @@ struct Arena
         return data_[idx];
     }
 
-    std::size_t capacity() const noexcept { return data_.capacity(); }
-    std::size_t size() const noexcept { return data_.size() - free_.size(); }
+    void reset() noexcept
+    {
+        data_.clear();
+        free_.clear();
+    }
 
 private:
     std::vector<T> data_;
-    std::vector<std::size_t>free_;
+    std::vector<Index> free_;
 };
