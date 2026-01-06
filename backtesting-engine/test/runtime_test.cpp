@@ -135,7 +135,7 @@ void test_large_batch_performance()
     
     const std::size_t num_orders = 1000000;
     const std::size_t num_workers = 4;
-    const std::size_t batch_size = 1000;  // ✅ Much larger batches
+    const std::size_t batch_size = 10000;  // ✅ Much larger batches
     
     std::cout << "Configuration: " << num_orders << " orders, " << num_workers 
               << " workers, batch size " << batch_size << std::endl;
@@ -161,7 +161,9 @@ void test_large_batch_performance()
         
         if (batch_size > 0 && (i + 1) % batch_size == 0)
         {
+            std::cout << "Batch" << i << "\n";
             runtime.execute_batch();  // ✅ Non-blocking, doesn't wait
+            std::this_thread::sleep_for(std::chrono::nanoseconds(1000));
         }
     }
     
