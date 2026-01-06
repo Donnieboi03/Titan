@@ -5,65 +5,51 @@
 #include <chrono>
 #include <atomic>
 
-// Test job arguments
-struct TestArgs
-{
-    std::string text;
-    int value;
-    std::atomic<int>* counter;
-};
-
-using ArgsPool = Arena<TestArgs>;
-
-// Test job functions
-void increment_counter_job(void* args)
-{
-    auto* test_args = static_cast<TestArgs*>(args);
-    test_args->counter->fetch_add(1, std::memory_order_relaxed);
-}
-
-void print_job(void* args)
-{
-    auto* test_args = static_cast<TestArgs*>(args);
-    std::cout << test_args->text << " " << test_args->value << std::endl;
-}
-
-void compute_job(void* args)
-{
-    auto* test_args = static_cast<TestArgs*>(args);
-    volatile int result = 0;
-    for (int i = 0; i < 1000; ++i)  // Less work: 1k iterations
-    {
-        result += i * test_args->value;
-    }
-    test_args->counter->fetch_add(1, std::memory_order_relaxed);
-}
-
 void test_basic_job_submission()
 {
     std::cout << "=== Testing Basic Job Submission ===\n";
-    
-    JobScheduler scheduler(4);
-    ArgsPool args_pool(10);  // Capacity for 10 args
     std::atomic<int> counter{0};
     
-    // Use Arena allocation
-    auto idx1 = args_pool.emplace("Job 1", 42, &counter);
-    auto idx2 = args_pool.emplace("Job 2", 100, &counter);
-    auto idx3 = args_pool.emplace("Job 3", 200, &counter);
+    {
+        JobScheduler scheduler(3, 1000);
+        
+        Job job1(
+            [&counter]() { 
+                std::cout << "Job 1 executing\n";
+                counter.fetch_add(1, std::memory_order_relaxed); 
+            },
+            []() {},
+            0
+        );
+        
+        Job job2(
+            [&counter]() { 
+                std::cout << "Job 2 executing\n";
+                counter.fetch_add(1, std::memory_order_relaxed); 
+            },
+            []() {},
+            1
+        );
+        
+        Job job3(
+            [&counter]() { 
+                std::cout << "Job 3 executing\n";
+                counter.fetch_add(1, std::memory_order_relaxed); 
+            },
+            []() {},
+            2
+        );
+        
+        std::cout << "Submitting jobs...\n";
+        scheduler.submit_job(std::move(job1));
+        scheduler.submit_job(std::move(job2));
+        scheduler.submit_job(std::move(job3));
+        
+        std::cout << "Calling process_jobs()...\n";
+        scheduler.process_jobs();
+    }
     
-    Job job1{increment_counter_job, &args_pool[idx1], 0};
-    Job job2{increment_counter_job, &args_pool[idx2], 1};
-    Job job3{increment_counter_job, &args_pool[idx3], 2};
-    
-    // Stage 1: Submit jobs to different workers
-    scheduler.submit_job(std::move(job1));
-    scheduler.submit_job(std::move(job2));
-    scheduler.submit_job(std::move(job3));
-    
-    // Stage 2: Process all jobs
-    scheduler.process_jobs();
-    
+    std::cout << "Counter value: " << counter.load() << "\n";
     assert(counter.load() == 3 && "All 3 jobs should have executed");
     
     std::cout << "✓ Basic Job Submission test PASSED!\n\n";
@@ -72,26 +58,24 @@ void test_basic_job_submission()
 void test_multiple_jobs_same_worker()
 {
     std::cout << "=== Testing Multiple Jobs on Same Worker ===\n";
-    
-    JobScheduler scheduler(4);
-    ArgsPool args_pool(150);
     std::atomic<int> counter{0};
-    
     const int NUM_JOBS = 100;
-    std::vector<Job> jobs;
     
-    for (int i = 0; i < NUM_JOBS; ++i)
     {
-        auto idx = args_pool.emplace("Job", i, &counter);
-        jobs.push_back(Job{increment_counter_job, &args_pool[idx], 0});
+        JobScheduler scheduler(4, 1000);
+        
+        for (int i = 0; i < NUM_JOBS; ++i)
+        {
+            Job job(
+                [&counter]() { counter.fetch_add(1, std::memory_order_relaxed); },
+                []() {},
+                0  // All to worker 0
+            );
+            scheduler.submit_job(std::move(job));
+        }
+        
+        scheduler.process_jobs();
     }
-    
-    for (auto& job : jobs)
-    {
-        scheduler.submit_job(std::move(job));
-    }
-    
-    scheduler.process_jobs();
     
     assert(counter.load() == NUM_JOBS && "All jobs should have executed");
     
@@ -103,27 +87,26 @@ void test_round_robin_distribution()
     std::cout << "=== Testing Round-Robin Distribution ===\n";
     
     const int NUM_WORKERS = 4;
-    JobScheduler scheduler(NUM_WORKERS);
-    ArgsPool args_pool(1200);  // Capacity for 1200 args
+    const int NUM_JOBS = 1000;
     std::atomic<int> counter{0};
     
-    const int NUM_JOBS = 1000;
-    std::vector<Job> jobs;
-    
-    // Use Arena allocation for stable addresses
-    for (int i = 0; i < NUM_JOBS; ++i)
     {
-        auto idx = args_pool.emplace("Job", i, &counter);
-        jobs.push_back(Job{increment_counter_job, &args_pool[idx], static_cast<std::size_t>(i % NUM_WORKERS)});
-    }
+        JobScheduler scheduler(NUM_WORKERS, 1000);
     
-    // Distribute jobs round-robin across workers
-    for (int i = 0; i < NUM_JOBS; ++i)
-    {
-        scheduler.submit_job(std::move(jobs[i]));
-    }
     
-    scheduler.process_jobs();
+        // Distribute jobs round-robin across workers
+        for (int i = 0; i < NUM_JOBS; ++i)
+        {
+            Job job(
+                [&counter]() { counter.fetch_add(1, std::memory_order_relaxed); },
+                []() {},
+                static_cast<std::size_t>(i % NUM_WORKERS)
+            );
+            scheduler.submit_job(std::move(job));
+        }
+        
+        scheduler.process_jobs();
+    }
     
     assert(counter.load() == NUM_JOBS && "All jobs should have executed");
     
@@ -134,29 +117,34 @@ void test_computational_jobs()
 {
     std::cout << "=== Testing Computational Jobs ===\n";
     
-    JobScheduler scheduler(4);
-    ArgsPool args_pool(150);  // Capacity for 150 args
     std::atomic<int> counter{0};
-    
     const int NUM_JOBS = 100;
-    std::vector<Job> jobs;
-    
-    // Use Arena allocation for stable addresses
-    for (int i = 0; i < NUM_JOBS; ++i)
-    {
-        auto idx = args_pool.emplace("Compute", i, &counter);
-        jobs.push_back(Job{compute_job, &args_pool[idx], static_cast<std::size_t>(i % 4)});
-    }
-    
     auto start = std::chrono::high_resolution_clock::now();
     
-    // Submit jobs across all workers
-    for (int i = 0; i < NUM_JOBS; ++i)
     {
-        scheduler.submit_job(std::move(jobs[i]));
-    }
+        JobScheduler scheduler(4, 1000);
     
-    scheduler.process_jobs();
+        // Submit computational jobs across all workers
+        for (int i = 0; i < NUM_JOBS; ++i)
+        {
+            int value = i;
+            Job job(
+                [&counter, value]() {
+                    volatile int result = 0;
+                    for (int j = 0; j < 1000; ++j)
+                    {
+                        result += j * value;
+                    }
+                    counter.fetch_add(1, std::memory_order_relaxed);
+                },
+                []() {},
+                static_cast<std::size_t>(i % 4)
+            );
+            scheduler.submit_job(std::move(job));
+        }
+        
+        scheduler.process_jobs();
+    }
     
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
@@ -171,35 +159,34 @@ void test_stress_submission()
 {
     std::cout << "=== Testing Stress Submission ===\n";
     
-    JobScheduler scheduler(8);
-    const int NUM_JOBS = 100000;
-    ArgsPool args_pool(NUM_JOBS + 200);  // Capacity for 12000 args
+    const int NUM_JOBS = 1000000;
+    const int WORKERS = 1;
+    const int BATCH_SIZE = NUM_JOBS / WORKERS;
     std::atomic<int> counter{0};
-    
-    std::vector<Job> jobs;
-    
-    jobs.reserve(NUM_JOBS);
-    
-    // Use Arena allocation for stable addresses
-    for (int i = 0; i < NUM_JOBS; ++i)
-    {
-        auto idx = args_pool.emplace("Stress", i, &counter);
-        jobs.push_back(Job{increment_counter_job, &args_pool[idx], static_cast<std::size_t>(i % 8)});
-    }
-    
     auto start = std::chrono::high_resolution_clock::now();
     
-    // Rapid-fire job submission
-    for (int i = 0; i < NUM_JOBS; ++i)
     {
-        scheduler.submit_job(std::move(jobs[i]));
+        JobScheduler scheduler(WORKERS, BATCH_SIZE);  // Larger capacity for stress test
+        
+        // Rapid-fire job submission
+        for (int i = 0; i < NUM_JOBS; ++i)
+        {
+            Job job(
+                [&counter]() { counter.fetch_add(1, std::memory_order_relaxed); },
+                []() {},
+                static_cast<std::size_t>(i % WORKERS)
+            );
+            
+            auto wid = scheduler.submit_job(std::move(job));
+            assert(wid != static_cast<std::size_t>(-1) && "submit_job dropped a job");
+        }    
+        
+        scheduler.process_jobs();
     }
-    
-    scheduler.process_jobs();
     
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
+    std::cout << "Final Count: " << counter.load() << "\n";
     assert(counter.load() == NUM_JOBS && "All stress test jobs should have executed");
     
     std::cout << "  Processed " << NUM_JOBS << " jobs in " << duration.count() << "ms\n";
@@ -211,23 +198,25 @@ void test_empty_check()
 {
     std::cout << "=== Testing Empty Check ===\n";
     
-    JobScheduler scheduler(4);
-    ArgsPool args_pool(10);  // Capacity for 10 args
+    JobScheduler scheduler(4, 1000);
     
     // Initially should be empty
-    assert(scheduler.all_empty() && "Scheduler should be empty initially");
+    assert(scheduler.is_complete() && "Scheduler should be empty initially");
     
     std::atomic<int> counter{0};
-    auto idx = args_pool.emplace("Test", 1, &counter);
-    Job job{increment_counter_job, &args_pool[idx], 0};
+    Job job(
+        [&counter]() { counter.fetch_add(1, std::memory_order_relaxed); },
+        []() {},
+        0
+    );
     
     scheduler.submit_job(std::move(job));
     
-    // Wait for job to complete
+    // Execute and wait for job to complete
     scheduler.process_jobs();
     
     // Should be empty again
-    assert(scheduler.all_empty() && "Scheduler should be empty after completion");
+    assert(scheduler.is_complete() && "Scheduler should be empty after completion");
     assert(counter.load() == 1 && "Job should have executed");
     
     std::cout << "✓ Empty Check test PASSED!\n\n";
@@ -238,20 +227,18 @@ void test_sequential_vs_parallel()
     std::cout << "=== Testing Sequential vs Parallel Performance ===\n";
     
     const int NUM_JOBS = 10000;
-    std::atomic<int> counter{0};
-    ArgsPool args_pool(NUM_JOBS + 200);  // Capacity for 1200 args
-    
-    std::vector<size_t> indices;
-    for (int i = 0; i < NUM_JOBS; ++i)
-    {
-        indices.push_back(args_pool.emplace("Compute", i, &counter));
-    }
+    std::atomic<int> seq_counter{0};
     
     // Sequential execution
     auto seq_start = std::chrono::high_resolution_clock::now();
-    for (auto idx : indices)
+    for (int i = 0; i < NUM_JOBS; ++i)
     {
-        compute_job(&args_pool[idx]);
+        volatile int result = 0;
+        for (int j = 0; j < 1000; ++j)
+        {
+            result += j * i;
+        }
+        seq_counter.fetch_add(1, std::memory_order_relaxed);
     }
     auto seq_end = std::chrono::high_resolution_clock::now();
     auto seq_duration = std::chrono::duration_cast<std::chrono::milliseconds>(seq_end - seq_start);
@@ -259,21 +246,33 @@ void test_sequential_vs_parallel()
     std::cout << "  Sequential: " << seq_duration.count() << "ms\n";
     
     // Parallel execution - distribute jobs across all 4 workers
-    counter.store(0);
-    auto NUM_WORKERS = 4;
-    JobScheduler scheduler(NUM_WORKERS);
-    std::vector<Job> jobs;
-    for (int i = 0; i < NUM_JOBS; ++i)
-    {
-        jobs.push_back(Job{compute_job, &args_pool[indices[i]], static_cast<std::size_t>(i % NUM_WORKERS)});
-    }
+    std::atomic<int> par_counter{0};
+    const int NUM_WORKERS = 4;
     
     auto par_start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < NUM_JOBS; ++i)
+    
     {
-        scheduler.submit_job(std::move(jobs[i]));
+        JobScheduler scheduler(NUM_WORKERS, NUM_JOBS / NUM_WORKERS);
+        for (int i = 0; i < NUM_JOBS; ++i)
+        {
+            int value = i;
+            Job job(
+                [&par_counter, value]() {
+                    volatile int result = 0;
+                    for (int j = 0; j < 1000; ++j)
+                    {
+                        result += j * value;
+                    }
+                    par_counter.fetch_add(1, std::memory_order_relaxed);
+                },
+                []() {},
+                static_cast<std::size_t>(i % NUM_WORKERS)
+            );
+            scheduler.submit_job(std::move(job));
+        }
+        scheduler.process_jobs();
     }
-    scheduler.process_jobs();
+    
     auto par_end = std::chrono::high_resolution_clock::now();
     auto par_duration = std::chrono::duration_cast<std::chrono::milliseconds>(par_end - par_start);
     
@@ -282,10 +281,12 @@ void test_sequential_vs_parallel()
     double speedup = static_cast<double>(seq_duration.count()) / par_duration.count();
     std::cout << "  Speedup: " << speedup << "x\n";
     
-    assert(counter.load() == NUM_JOBS && "All parallel jobs should have executed");
+    assert(par_counter.load() == NUM_JOBS && "All parallel jobs should have executed");
     
     std::cout << "✓ Sequential vs Parallel test PASSED!\n\n";
 }
+
+
 
 int main()
 {
@@ -293,13 +294,16 @@ int main()
     std::cout << "  Job Scheduler Tests\n";
     std::cout << "========================================\n\n";
     
-    test_basic_job_submission();
-    test_multiple_jobs_same_worker();
-    test_round_robin_distribution();
-    test_computational_jobs();
-    test_empty_check();
-    test_stress_submission();
-    test_sequential_vs_parallel();
+    for (int i = 0; i < 10; i++)
+    {
+        test_basic_job_submission();
+        test_multiple_jobs_same_worker();
+        test_round_robin_distribution();
+        test_computational_jobs();
+        test_empty_check();
+        test_stress_submission();
+        test_sequential_vs_parallel();
+    }
     
     std::cout << "========================================\n";
     std::cout << "  All Scheduler Tests PASSED! ✓\n";

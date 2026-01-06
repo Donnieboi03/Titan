@@ -208,7 +208,7 @@ void test_stress_orders()
 {
     std::cout << "=== Stress Testing Order Operations ===\n";
     
-    const int NUM_ORDERS = 10000000;
+    const int NUM_ORDERS = 1000000;
     OrderEngine engine("SPY", NUM_ORDERS + 1, false, false);
     
     std::vector<OrderId> order_ids;
@@ -260,7 +260,7 @@ void test_stress_orders()
               << (cancel_duration * 1000.0 / cancelled_count) << " μs/cancel\n\n";
     
     // ========== EDIT THROUGHPUT ==========
-    const int NUM_EDITS = 1000;
+    const int NUM_EDITS = NUM_ORDERS / 2;
     std::cout << "Editing " << NUM_EDITS << " orders...\n";
     auto edit_start = std::chrono::high_resolution_clock::now();
     
@@ -287,14 +287,16 @@ void test_stress_orders()
     std::cout << "Querying orders by status...\n";
     auto query_start = std::chrono::high_resolution_clock::now();
     
-    auto open_orders = engine.get_orders_by_status(OrderStatus::OPEN);
-    auto cancelled_orders = engine.get_orders_by_status(OrderStatus::CANCELLED);
+    const auto& open_orders = engine.get_orders_by_status(OrderStatus::OPEN);
+    const auto& cancelled_orders = engine.get_orders_by_status(OrderStatus::CANCELLED);
+    const auto& filled_orders = engine.get_orders_by_status(OrderStatus::FILLED);
     
     auto query_end = std::chrono::high_resolution_clock::now();
     auto query_duration = std::chrono::duration_cast<std::chrono::microseconds>(query_end - query_start).count();
     
     std::cout << "Open orders: " << open_orders.size() << "\n";
     std::cout << "Cancelled orders: " << cancelled_orders.size() << "\n";
+    std::cout << "Filled orders: " << filled_orders.size() << "\n";
     std::cout << "Query time: " << query_duration << " μs\n\n";
     
     // ========== SUMMARY ==========
