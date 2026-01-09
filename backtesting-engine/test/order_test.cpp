@@ -208,8 +208,8 @@ void test_stress_orders()
 {
     std::cout << "=== Stress Testing Order Operations ===\n";
     
-    const int NUM_ORDERS = 1000000;
-    OrderEngine engine("SPY", NUM_ORDERS + 1, false, false);
+    const int NUM_ORDERS = 10000000;
+    OrderEngine engine("SPY", NUM_ORDERS, false, false);
     
     std::vector<OrderId> order_ids;
     
@@ -239,25 +239,29 @@ void test_stress_orders()
     
     // ========== CANCELLATION THROUGHPUT ==========
     std::cout << "Cancelling " << order_ids.size() / 2 << " orders...\n";
-    auto cancel_start = std::chrono::high_resolution_clock::now();
-    
+    int cancel_attempts = 0;
     int cancelled_count = 0;
+    auto cancel_start = std::chrono::high_resolution_clock::now();
     for (size_t i = 0; i < order_ids.size() / 2; ++i)
     {
+        ++cancel_attempts;                       // count every attempt
         if (engine.cancel_order(order_ids[i]))
-            cancelled_count++;
+            ++cancelled_count;
     }
-    
     auto cancel_end = std::chrono::high_resolution_clock::now();
-    auto cancel_duration = std::chrono::duration_cast<std::chrono::milliseconds>(cancel_end - cancel_start).count();
-    double cancel_throughput = (cancelled_count / (cancel_duration / 1000.0));
-    
-    std::cout << "Cancelled " << cancelled_count << " orders successfully.\n";
-    std::cout << "Time: " << cancel_duration << " ms\n";
-    std::cout << "Throughput: " << std::fixed << std::setprecision(2) 
-              << cancel_throughput << " cancels/sec\n";
-    std::cout << "Latency: " << std::fixed << std::setprecision(3) 
-              << (cancel_duration * 1000.0 / cancelled_count) << " μs/cancel\n\n";
+    auto cancel_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(cancel_end - cancel_start).count();
+
+    double attempts_per_sec = cancel_attempts / (cancel_duration_ms / 1000.0);
+    double success_per_sec  = cancelled_count / (cancel_duration_ms / 1000.0);
+    double success_rate     = (cancel_attempts == 0) ? 0.0 : (100.0 * cancelled_count / cancel_attempts);
+
+    // throughput (successful cancellations per second)
+    double cancel_throughput = (cancel_duration_ms == 0) ? 0.0 : (cancelled_count / (cancel_duration_ms / 1000.0));
+
+    std::cout << "Cancel attempts: " << cancel_attempts << ", successes: " << cancelled_count
+              << ", success rate: " << success_rate << "%\n";
+    std::cout << "Attempts/sec: " << attempts_per_sec << ", Successes/sec: " << success_per_sec
+              << " Time (ms): " << cancel_duration_ms << "\n";
     
     // ========== EDIT THROUGHPUT ==========
     const int NUM_EDITS = NUM_ORDERS / 2;
@@ -308,7 +312,7 @@ void test_stress_orders()
     std::cout << "Cancel Orders: " << std::fixed << std::setprecision(2) 
               << cancel_throughput << " ops/sec (" 
               << std::fixed << std::setprecision(3) 
-              << (cancel_duration * 1000.0 / cancelled_count) << " μs/op)\n";
+              << ( (cancelled_count == 0) ? 0.0 : (cancel_duration_ms * 1000.0 / cancelled_count) ) << " μs/op)\n";
     std::cout << "Edit Orders:   " << std::fixed << std::setprecision(2) 
               << edit_throughput << " ops/sec (" 
               << std::fixed << std::setprecision(3) 
@@ -476,7 +480,14 @@ int main()
     
     // Set verbose mode from environment or default to false
     // You can set VERBOSE = true; here to enable verbose output
-    
+    // std::cout << "=== STRUCT SIZES ===\n";
+    // std::cout << "sizeof(OrderInfo)                = " << sizeof(OrderInfo) << " bytes\n";
+    // std::cout << "sizeof(OrderLevel::value_type)   = " << sizeof(OrderLevel) << " bytes\n";
+    // std::cout << "sizeof(OrderId)                  = " << sizeof(OrderId) << " bytes\n";
+    // std::cout << "sizeof(OrderArena::Index)        = " << sizeof(OrderArena::Index) << " bytes\n";
+    // std::cout << "sizeof(Price)                    = " << sizeof(Price) << " bytes\n";
+    // std::cout << "sizeof(Quantity)                 = " << sizeof(Quantity) << " bytes\n";
+    // std::cout << "=====================\n\n";
     test_place_limit_order();
     test_place_market_order();
     test_cancel_order();
@@ -485,7 +496,6 @@ int main()
     test_order_priority();
     test_order_matching_correctness();
     test_stress_orders();
-    
     std::cout << "========================================\n";
     std::cout << "  All Order Tests PASSED! ✓\n";
     std::cout << "========================================\n";
