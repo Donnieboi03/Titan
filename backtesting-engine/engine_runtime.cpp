@@ -4,25 +4,87 @@
 #include "../tools/arena.cpp"
 #include <unordered_set>
 
-// Participant ID for tracking ownership
 using UserId = std::uint32_t;
 constexpr UserId IPO_HOLDER = 0;  // IPO holder owns all initial shares
 
 using EngineId = std::uint32_t;
 struct OrderEngineInfo
 {
-    OrderEngine engine_;  // Direct storage, no heap allocation
-    Quantity ipo_shares_;
-    EngineId engine_id_;
+    OrderEngine engine_;  // Engine Object
+    Quantity ipo_shares_; // Intial IPO
+    EngineId engine_id_; // Id for Engine
+    WorkerId worker_id_; // Id for Worker
+    std::size_t batch_counter_; // Per-engine auto-batching counter
     
     // Constructor for in-place construction
     OrderEngineInfo(const std::string& ticker, std::size_t capacity, bool verbose, 
-                    Quantity ipo_shares, EngineId engine_id)
-    : engine_(ticker, capacity, verbose, true),  // auto_match = true
-      ipo_shares_(ipo_shares),
-      engine_id_(engine_id)
+        Quantity ipo_shares, EngineId engine_id, WorkerId worker_id)
+    :engine_(ticker, capacity, verbose, true),  // auto_match = true
+    ipo_shares_(ipo_shares),
+    engine_id_(engine_id),
+    worker_id_(worker_id),
+    batch_counter_(0)
     {}
 };
+
+enum class RequestStatus : std::uint8_t
+{
+    Pending,    // Request has been created but not yet submitted
+    InProgress,     // Request is currently being processed by a worker
+    Completed,      // Request finished successfully and result is available
+    Failed,         // Request finished but encountered an error
+    Cancelled       // Request was cancelled before completion
+};
+
+// Different Request Types
+enum class ResultKind : std::uint8_t 
+{
+    None,
+    OrderId,
+    Price,
+    Bool,
+};
+
+struct RequestRecord 
+{
+    std::atomic<bool> ready;
+    ResultKind kind;       
+    RequestStatus status; 
+
+    union { // Union Types
+        OrderId   order_id;    
+        Price     price;       
+        bool      ok;          
+    } result;
+};
+
+using RequestId = std::uint32_t;
+using RequestArena = Arena<RequestRecord>;
+using RequestMap = std::unordered_map<RequestId, RequestArena::Index>;
+
+template <typename T>
+class RequestHandle 
+{
+public:
+    bool ready() const noexcept
+    {
+        return record_->ready.load(std::memory_order_acquire);
+    }
+
+    const T& value() const noexcept
+    {
+        // caller responsibility: check ready()
+        return record_->result;
+    }
+
+private:
+    friend class EngineRuntime;
+    explicit RequestHandle(RequestRecord<T>* rec)
+        : record_(rec) {}
+
+    RequestRecord<T>* record_;
+};
+
 
 using EngineMap = std::unordered_map<std::string, OrderEngineInfo>;
 
@@ -53,7 +115,7 @@ public:
     EngineRuntime& operator=(const EngineRuntime&) = delete;
     
     // Singleton instance accessor
-    static EngineRuntime& get_instance(std::size_t num_threads = 4, std::size_t default_capacity = 100000, std::size_t batch_size = 0, bool _verbose = true, bool blocking = true)
+    static EngineRuntime& get_instance(std::size_t num_threads = 1, std::size_t default_capacity = 32768, std::size_t batch_size = 0, bool _verbose = true, bool blocking = true)
     {
         static EngineRuntime instance(num_threads, default_capacity, batch_size, _verbose, blocking);
         return instance;
@@ -74,28 +136,20 @@ public:
             // Use provided capacity or default
             std::size_t engine_capacity = capacity > 0 ? capacity : default_capacity_;
             auto engine = std::make_shared<OrderEngine>(_ticker, engine_capacity, verbose_);
-            if (!engine)
-                throw std::runtime_error("Null Matching Engine");
-
+            
             // Assign engine ID for job routing
-            std::size_t engine_id = next_engine_id_++;
+            EngineId engine_id = next_engine_id_++;
 
             // Construct OrderEngineInfo directly in the map
             auto [it, inserted] = stock_exchange_.emplace(
                 std::piecewise_construct,
                 std::forward_as_tuple(_ticker),
                 std::forward_as_tuple(_ticker, engine_capacity, verbose_, _ipo_qty, 
-                                      static_cast<EngineId>(engine_id))
+                                      engine_id, engine_id % num_workers_)
             );
             
-            if (!inserted)
-                throw std::runtime_error("Failed to insert stock");
-
             // Place initial sell at IPO Price and IPO Quantity (from IPO holder)
             OrderId ipo_order = it->second.engine_.place_order(OrderSide::ASK, OrderType::LIMIT, _ipo_price, _ipo_qty);
-            // If no Order then error (check for -1 instead of !ipo_order)
-            if (ipo_order == static_cast<OrderId>(-1))
-                throw std::runtime_error("IPO Order Failed to Place");
             
             // Track IPO order ownership
             user_orders_[IPO_HOLDER][_ticker].insert(ipo_order);
@@ -120,21 +174,21 @@ public:
     {
         try
         {
-            // Check if stock exists
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end())
+            // Find the stock once and reuse the iterator
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end())
                 throw std::runtime_error("Stock Does Not Exist");
-            
-            // Wait for any pending jobs to complete
-            wait_for_jobs();
-            
-            // Remove stock from exchange
+
+            auto& engine_info = it->second;
+
+            // Wait for worker to finish batch
+            scheduler_.process_jobs_on(engine_info.worker_id_);
+            // Erase stock from exchange
             stock_exchange_.erase(_ticker);
             
-            // Remove all user orders for this ticker
+            // Erase all user orders for this ticker
             for (auto& [user_id, user_tickers] : user_orders_)
-            {
                 user_tickers.erase(_ticker);
-            }
             
             if (verbose_)
                 std::cout << "[RUNTIME] Unregistered " << _ticker << std::endl;
@@ -154,24 +208,16 @@ public:
     {
         try
         {
-            // Wait for all pending jobs to complete
-            wait_for_jobs();
-            
-            // Clear all stocks
-            stock_exchange_.clear();
-            
-            // Clear user orders
-            user_orders_.clear();
+            scheduler_.process_jobs(); // Wait for pending jobs
+            stock_exchange_.clear(); // Clear Stocks
+            user_orders_.clear(); // Clear User Orders
             
             // Reset counters
             next_engine_id_ = 0;
-            batch_counter_ = 0;
             
             // Clear arenas (free all allocated slots)
             for (auto& arena : worker_arenas_)
-            {
-                arena.reset();  // Reset arena to initial state
-            }
+                arena.reset();
             
             if (verbose_)
                 std::cout << "[RUNTIME] Reset complete - all stocks and orders cleared" << std::endl;
@@ -187,7 +233,8 @@ public:
     {
         try
         {
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end()) 
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end()) 
                 throw std::runtime_error("Stock Does Not Exist");
             if (_price <= 0 || _qty <= 0)
                 throw std::runtime_error("Price/Quantity must be > 0");
@@ -203,12 +250,12 @@ public:
                 }
             }
             
-            std::size_t engine_id = stock_exchange_.at(_ticker).engine_id_;
-            std::size_t worker_id = engine_id % num_workers_;
-            auto& arena = worker_arenas_[worker_id];
-            
+            auto& engine_info = it->second;
+            auto& arena = worker_arenas_[engine_info.worker_id_];
+            OrderEngine* engine_ptr = &it->second.engine_;
+
             auto args_idx = arena.emplace(OrderJobArgs{
-                &stock_exchange_.at(_ticker).engine_, _side, OrderType::LIMIT,
+                engine_ptr, _side, OrderType::LIMIT,
                 _price, _qty, 0, user_id, result_id_ptr, nullptr
             });
             
@@ -221,36 +268,33 @@ public:
             
             // Capture this for user_orders_ access
             auto* runtime = this;
-            std::string ticker_copy = _ticker;  // Copy for lambda
             
             Job job(
                 // Execute lambda
-                [arena_ptr, args_idx, runtime, ticker_copy]() {
+                [arena_ptr, args_idx, runtime, _ticker]() {
                     auto* params = &(*arena_ptr)[args_idx];
                     OrderId order_id = params->engine->place_order(params->side, params->type, params->price, params->qty);
                     *(params->result_id) = order_id;
                     
                     // Track order ownership
                     if (order_id != static_cast<OrderId>(-1))
-                        runtime->user_orders_[params->user_id][ticker_copy].insert(order_id);
+                        runtime->user_orders_[params->user_id][_ticker].insert(order_id);
                 },
                 // Cleanup lambda
                 [arena_ptr, args_idx]() {
                     arena_ptr->free(args_idx);
                 },
-                engine_id
+                engine_info.engine_id_
             );
             
             scheduler_.submit_job(std::move(job));
             
-            // Auto-execute batch if batch_size is set and reached
-            if (batch_size_ > 0)
+            // Increment per-engine batch counter and auto-execute batch if needed
+            engine_info.batch_counter_ += 1;
+            if (engine_info.batch_counter_ >= batch_size_)
             {
-                batch_counter_++;
-                if (batch_counter_ >= batch_size_)
-                {
-                    execute_batch();
-                }
+                execute_batch(engine_info.worker_id_);
+                engine_info.batch_counter_ = 0;
             }
         }
         catch(const std::exception& e)
@@ -265,7 +309,8 @@ public:
     {
         try
         {
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end()) 
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end()) 
                 throw std::runtime_error("Stock Does Not Exist");
             if (_qty <= 0)
                 throw std::runtime_error("Quantity must be > 0");
@@ -281,12 +326,12 @@ public:
                 }
             }
             
-            std::size_t engine_id = stock_exchange_.at(_ticker).engine_id_;
-            std::size_t worker_id = engine_id % num_workers_;
-            auto& arena = worker_arenas_[worker_id];
-            
+            auto& engine_info = it->second;
+            auto& arena = worker_arenas_[engine_info.worker_id_];
+            OrderEngine* engine_ptr = &it->second.engine_;
+
             auto args_idx = arena.emplace(OrderJobArgs{
-                &stock_exchange_.at(_ticker).engine_, _side, OrderType::MARKET,
+                engine_ptr, _side, OrderType::MARKET,
                 -1, _qty, 0, user_id, result_id_ptr, nullptr
             });
             
@@ -298,34 +343,31 @@ public:
             
             // Capture this for user_orders_ access
             auto* runtime = this;
-            std::string ticker_copy = _ticker;  // Copy for lambda
             
             Job job(
-                [arena_ptr, args_idx, runtime, ticker_copy]() {
+                [arena_ptr, args_idx, runtime, _ticker]() {
                     auto* params = &(*arena_ptr)[args_idx];
                     OrderId order_id = params->engine->place_order(params->side, params->type, params->price, params->qty);
                     *(params->result_id) = order_id;
                     
                     // Track order ownership
                     if (order_id != static_cast<OrderId>(-1))
-                        runtime->user_orders_[params->user_id][ticker_copy].insert(order_id);
+                        runtime->user_orders_[params->user_id][_ticker].insert(order_id);
                 },
                 [arena_ptr, args_idx]() {
                     arena_ptr->free(args_idx);
                 },
-                engine_id
+                engine_info.engine_id_
             );
             
             scheduler_.submit_job(std::move(job));
             
-            // Auto-execute batch if batch_size is set and reached
-            if (batch_size_ > 0)
+            // Increment per-engine batch counter and auto-execute batch if needed
+            engine_info.batch_counter_ += 1;
+            if (engine_info.batch_counter_ >= batch_size_)
             {
-                batch_counter_++;
-                if (batch_counter_ >= batch_size_)
-                {
-                    execute_batch();
-                }
+                execute_batch(engine_info.worker_id_);
+                engine_info.batch_counter_ = 0;
             }
         }
         catch(const std::exception& e)
@@ -340,15 +382,16 @@ public:
     {
         try
         {
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end()) 
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end()) 
                 throw std::runtime_error("Stock Does Not Exist");
-            
-            std::size_t engine_id = stock_exchange_.at(_ticker).engine_id_;
-            std::size_t worker_id = engine_id % num_workers_;
-            auto& arena = worker_arenas_[worker_id];
-            
+
+            auto& engine_info = it->second;
+            auto& arena = worker_arenas_[engine_info.worker_id_];
+            OrderEngine* engine_ptr = &it->second.engine_;
+
             auto args_idx = arena.emplace(OrderJobArgs{
-                &stock_exchange_.at(_ticker).engine_, OrderSide::BID, OrderType::LIMIT,
+                engine_ptr, OrderSide::BID, OrderType::LIMIT,
                 0, 0, order_id, user_id, nullptr, result_ptr
             });
             
@@ -360,35 +403,32 @@ public:
             
             // Capture this for user_orders_ access and ticker for cleanup
             auto* runtime = this;
-            std::string ticker_copy = _ticker;
             
             Job job(
-                [arena_ptr, args_idx, runtime, ticker_copy]() {
+                [arena_ptr, args_idx, runtime, _ticker]() {
                     auto* params = &(*arena_ptr)[args_idx];
                     *(params->result_bool) = params->engine->cancel_order(params->order_id);
                     
                     // Remove order from tracking if cancel was successful
                     if (*(params->result_bool))
                     {
-                        runtime->user_orders_[params->user_id][ticker_copy].erase(params->order_id);
+                        runtime->user_orders_[params->user_id][_ticker].erase(params->order_id);
                     }
                 },
                 [arena_ptr, args_idx]() {
                     arena_ptr->free(args_idx);
                 },
-                engine_id
+                engine_info.engine_id_
             );
             
             scheduler_.submit_job(std::move(job));
             
-            // Auto-execute batch if batch_size is set and reached
-            if (batch_size_ > 0)
+            // Increment per-engine batch counter and auto-execute batch if needed
+            engine_info.batch_counter_ += 1;
+            if (engine_info.batch_counter_ >= batch_size_)
             {
-                batch_counter_++;
-                if (batch_counter_ >= batch_size_)
-                {
-                    execute_batch();
-                }
+                execute_batch(engine_info.worker_id_);
+                engine_info.batch_counter_ = 0;
             }
         }
         catch(const std::exception& e)
@@ -403,15 +443,16 @@ public:
     {
         try
         {
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end()) 
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end()) 
                 throw std::runtime_error("Stock Does Not Exist");
-            
-            std::size_t engine_id = stock_exchange_.at(_ticker).engine_id_;
-            std::size_t worker_id = engine_id % num_workers_;
-            auto& arena = worker_arenas_[worker_id];
-            
+
+            auto& engine_info = it->second;
+            auto& arena = worker_arenas_[engine_info.worker_id_];
+            OrderEngine* engine_ptr = &it->second.engine_;
+
             auto args_idx = arena.emplace(OrderJobArgs{
-                &stock_exchange_.at(_ticker).engine_, _side, OrderType::LIMIT,
+                engine_ptr, _side, OrderType::LIMIT,
                 _price, _qty, order_id, 0, result_id_ptr, nullptr
             });
             
@@ -429,19 +470,17 @@ public:
                 [arena_ptr, args_idx]() {
                     arena_ptr->free(args_idx);
                 },
-                engine_id
+                engine_info.engine_id_
             );
             
             scheduler_.submit_job(std::move(job));
-            
-            // Auto-execute batch if batch_size is set and reached
-            if (batch_size_ > 0)
+            engine_info.batch_counter_ += 1;
+
+            // Auto-execute batch if batch_size is set and reached            
+            if (engine_info.batch_counter_ >= batch_size_)
             {
-                batch_counter_++;
-                if (batch_counter_ >= batch_size_)
-                {
-                    execute_batch();
-                }
+                execute_batch(engine_info.worker_id_);
+                engine_info.batch_counter_ = 0;
             }
         }
         catch(const std::exception& e)
@@ -456,10 +495,11 @@ public:
     {
         try
         {
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end()) 
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end()) 
                 throw std::runtime_error("Stock Does Not Exist");
 
-            auto order = stock_exchange_.at(_ticker).engine_.get_order(order_id);
+            const auto& order = it->second.engine_.get_order(order_id);
             // If no Order then error
             if (!order)
                 throw std::runtime_error("Failed to Get Order");
@@ -478,10 +518,11 @@ public:
     {
         try
         {
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end()) 
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end()) 
                 throw std::runtime_error("Stock Does Not Exist");
-            
-            return stock_exchange_.at(_ticker).engine_.get_market_price();
+
+            return it->second.engine_.get_market_price();
         }
         catch(const std::exception& e)
         {
@@ -495,10 +536,11 @@ public:
     {
         try
         {
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end()) 
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end()) 
                 throw std::runtime_error("Stock Does Not Exist");
 
-            auto best_bid = stock_exchange_.at(_ticker).engine_.get_best_bid();
+            auto best_bid = it->second.engine_.get_best_bid();
             // If no best bid then error
             if (best_bid == -1)
                 throw std::runtime_error("Bid Side is Empty");
@@ -516,10 +558,11 @@ public:
     {
         try
         {
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end()) 
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end()) 
                 throw std::runtime_error("Stock Does Not Exist");
-            
-            auto best_ask = stock_exchange_.at(_ticker).engine_.get_best_ask();
+
+            auto best_ask = it->second.engine_.get_best_ask();
             // If no best ask then error
             if (best_ask == -1)
                 throw std::runtime_error("Ask Side is Empty");
@@ -533,19 +576,21 @@ public:
         }
     }
 
-    std::vector<OrderInfo> get_orders_by_status(const std::string& _ticker, OrderStatus status) const
+    std::unordered_set<OrderId> get_orders_by_status(const std::string& _ticker, OrderStatus status) const
     {
         try
         {
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end()) 
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end()) 
                 throw std::runtime_error("Stock Does Not Exist");
-            return stock_exchange_.at(_ticker).engine_.get_orders_by_status(status);
+            return it->second.engine_.get_orders_by_status(status);
         }
         catch(const std::exception& e)
         {
             if (verbose_)
                 std::cerr << "Get Orders By Status Error: " << e.what() << '\n';
-            return {};
+            static const std::unordered_set<OrderId> empty_orders;
+            return empty_orders;
         }
     }
 
@@ -553,35 +598,38 @@ public:
     {
         try
         {
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end()) 
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end()) 
                 throw std::runtime_error("Stock Does Not Exist");
-            return stock_exchange_.at(_ticker).engine_.get_market_depth(_side, depth);
+            return it->second.engine_.get_market_depth(_side, depth);
         }
         catch(const std::exception& e)
         {
             if (verbose_)
                 std::cerr << "Get Market Depth Error: " << e.what() << '\n';
-            return {};
+            static const std::vector<std::pair<Price, Quantity>> empty_depth;
+            return empty_depth;
         }
     }
 
-    std::vector<std::string> get_tradable_tickers() const
+    std::vector<std::string> list_tickers() const noexcept
     {
         std::vector<std::string> tickers;
-        // Itterate Through All Stocks in Exchange
-        for (auto& stock: stock_exchange_)
+        // Iterate Through All Stocks in Exchange
+        for (const auto& stock: stock_exchange_)
             tickers.push_back(stock.first);
-        return std::move(tickers);
+        return tickers;
     }
     
-    OrderEngine* get_engine(const std::string& _ticker)
+    const OrderEngine* get_engine(const std::string& _ticker)
     {
         try
         {
              // If ticker is not in Exchange then error
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end())
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end())
                 throw std::runtime_error("Stock Does Not Exist");
-            return &stock_exchange_.at(_ticker).engine_;
+            return &it->second.engine_;
         }
         catch(const std::exception& e)
         {
@@ -596,9 +644,10 @@ public:
     {
         try
         {
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end())
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end())
                 throw std::runtime_error("Stock Does Not Exist");
-            stock_exchange_.at(_ticker).engine_.set_auto_match(auto_match);
+            it->second.engine_.set_auto_match(auto_match);
             return true;
         }
         catch(const std::exception& e)
@@ -614,9 +663,10 @@ public:
     {
         try
         {
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end())
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end())
                 throw std::runtime_error("Stock Does Not Exist");
-            return stock_exchange_.at(_ticker).engine_.get_auto_match();
+            return it->second.engine_.get_auto_match();
         }
         catch(const std::exception& e)
         {
@@ -627,7 +677,7 @@ public:
     }
         
     // Execute all submitted jobs in the batch
-    void execute_batch()
+    void execute_batch() noexcept
     {
         if (blocking_mode_)
         {
@@ -637,104 +687,132 @@ public:
         {
             scheduler_.process_jobs_async();  // Non-blocking: just signals workers
         }
-        batch_counter_ = 0;  // Reset counter after execution
-        // Note: Arena slots are automatically freed by cleanup callbacks
+        // Centralized reset: clear per-engine batch counters for all engines
+        for (auto& kv : stock_exchange_)
+            kv.second.batch_counter_ = 0;
     }
-    
-    // Wait for all pending jobs to complete (use in non-blocking mode)
-    void wait_for_jobs()
+
+    // Execute all submitted jobs in the batch
+    void execute_batch(WorkerId worker_id) noexcept
     {
-        scheduler_.wait_for_completion();
+        if (blocking_mode_)
+        {
+            scheduler_.process_jobs_on(worker_id);  // Blocking: waits for completion
+        }
+        else
+        {
+            scheduler_.process_jobs_on_async(worker_id);  // Non-blocking: just signals workers
+        }
+        // Centralized reset: clear per-engine batch counters for engines on this worker
+        for (auto& kv : stock_exchange_)
+            if (kv.second.worker_id_ == worker_id)
+                kv.second.batch_counter_ = 0;
     }
     
     // Check if all jobs are completed (non-blocking check)
-    bool jobs_completed() const
-    {
-        return scheduler_.is_complete();
-    }
+    bool all_jobs_completed() const noexcept { return scheduler_.is_complete(); }
     
     // Check if a specific stock's jobs are completed (by ticker)
-    bool stock_completed(const std::string& _ticker) const
+    bool is_engine_completed(const std::string& _ticker) const
     {
         try
         {
-            if (stock_exchange_.find(_ticker) == stock_exchange_.end())
+            auto it = stock_exchange_.find(_ticker);
+            if (it == stock_exchange_.end())
                 throw std::runtime_error("Stock Does Not Exist");
-            
-            std::size_t engine_id = stock_exchange_.at(_ticker).engine_id_;
+
+            std::size_t engine_id = it->second.engine_id_;
             std::size_t worker_id = engine_id % num_workers_;
             return scheduler_.is_worker_complete(worker_id);
         }
         catch(const std::exception& e)
         {
             if (verbose_)
-                std::cerr << "Stock Completed Check Error: " << e.what() << '\n';
+                std::cerr << "Is Engine Completed Error: " << e.what() << '\n';
             return false;
         }
     }
     
     // Set blocking mode (true = wait for completion, false = async)
-    void set_blocking_mode(bool blocking)
+    void set_blocking_mode(bool blocking) noexcept
     {
         blocking_mode_ = blocking;
     }
     
     // Get user's order IDs for a specific ticker
-    std::vector<OrderId> get_positions(UserId user_id, const std::string& ticker) const noexcept
+    std::vector<OrderId> get_positions(UserId user_id, const std::string& ticker) const
     {
-        auto user_it = user_orders_.find(user_id);
-        if (user_it == user_orders_.end())
+        try
+        {
+            auto user_it = user_orders_.find(user_id);
+            if (user_it == user_orders_.end())
+                throw std::runtime_error("User Does Not Exist");
+            
+            auto ticker_it = user_it->second.find(ticker);
+            if (ticker_it == user_it->second.end())
+                throw std::runtime_error("Stock Does Not Exist");
+            
+            // Return all order IDs for this user and ticker
+            return std::vector<OrderId>(ticker_it->second.begin(), ticker_it->second.end());
+        }
+        catch(const std::exception& e)
+        {
+            std::cerr << e.what() << '\n';
             return {};
-        
-        auto ticker_it = user_it->second.find(ticker);
-        if (ticker_it == user_it->second.end())
-            return {};
-        
-        // Return all order IDs for this user and ticker
-        return std::vector<OrderId>(ticker_it->second.begin(), ticker_it->second.end());
+        }
     }
     
     // Check if user has sufficient shares to sell
-    bool has_sufficient_shares(UserId user_id, const std::string& ticker, Quantity qty) const noexcept
+    bool has_sufficient_shares(UserId user_id, const std::string& ticker, Quantity qty) const
     {
-        auto user_it = user_orders_.find(user_id);
-        if (user_it == user_orders_.end())
-            return false;
-        
-        auto ticker_it = user_it->second.find(ticker);
-        if (ticker_it == user_it->second.end())
-            return false;
-        
-        // Find the engine for this ticker
-        auto engine_it = stock_exchange_.find(ticker);
-        if (engine_it == stock_exchange_.end())
-            return false;
-        
-        // Sum quantities from all OPEN ASK orders (shares available to sell)
-        Quantity total = 0;
-        const OrderEngine& engine = engine_it->second.engine_;
-        for (OrderId order_id : ticker_it->second)
+        try
         {
-            const OrderInfo* order = engine.get_order(order_id);
-            if (order && order->status_ == OrderStatus::OPEN && order->side_ == OrderSide::ASK)
-                total += order->qty_;
+            auto user_it = user_orders_.find(user_id);
+            if (user_it == user_orders_.end())
+                throw std::runtime_error("User Does Not Exist");
+              
+            auto engine_it = stock_exchange_.find(ticker);
+            if (engine_it == stock_exchange_.end())
+                throw std::runtime_error("Stock Does Not Exist");
+                
+            auto ticker_it = user_it->second.find(ticker);
+            if (ticker_it == user_it->second.end())
+                throw std::runtime_error("User Does Not Own Stock");
+            
+                // Sum quantities from all OPEN ASK orders (shares available to sell)
+            Quantity total = 0;
+            const OrderEngine& engine = engine_it->second.engine_;
+            for (OrderId order_id : ticker_it->second)
+            {
+                const OrderInfo* order = engine.get_order(order_id);
+                if (order && order->status_ == OrderStatus::OPEN && order->side_ == OrderSide::ASK)
+                    total += order->qty_;
+            }
+            
+            return total >= qty;
+        }
+        catch(const std::exception& e)
+        {
+            std::cerr << "Has Sufficient Shares Error: " << e.what() << '\n';
+            return false;
         }
         
-        return total >= qty;
     }
 
     // Get blocking mode
-    bool get_blocking_mode() const { return blocking_mode_; }
+    bool get_blocking_mode() const noexcept { return blocking_mode_; }
     
     // Set batch size for auto-execution (0 = manual batching only)
-    void set_batch_size(std::size_t batch_size)
+    void set_batch_size(std::size_t batch_size) noexcept
     {
         batch_size_ = batch_size;
-        batch_counter_ = 0;
+        // Reset per-engine batch counters
+        for (auto& kv : stock_exchange_)
+            kv.second.batch_counter_ = 0;
     }
     
     // Get current batch size
-    std::size_t get_batch_size() const { return batch_size_; }
+    std::size_t get_batch_size() const noexcept { return batch_size_; }
 
 private:
     EngineMap stock_exchange_;  // Maps ticker -> OrderEngineInfo (contains engine, ipo_shares, engine_id)
@@ -743,8 +821,7 @@ private:
     std::size_t num_workers_;  // Number of worker threads
     std::size_t default_capacity_; // Default capacity for new OrderEngines
     std::size_t batch_size_;  // Auto-execute batch after this many jobs (0 = manual only)
-    std::size_t batch_counter_;  // Counter for auto-batching
-    std::size_t next_engine_id_;  // Counter for assigning engine IDs
+    EngineId next_engine_id_;  // Counter for assigning engine IDs
     bool verbose_; // Verbose Mode
     bool blocking_mode_;  // True = wait for completion, False = async
     
@@ -753,12 +830,11 @@ private:
     
     // Private constructor for singleton
     EngineRuntime(std::size_t num_threads, std::size_t default_capacity, std::size_t batch_size, bool _verbose, bool blocking)
-    : scheduler_(num_threads),
-      num_workers_(num_threads),
+    : num_workers_(num_threads),
       default_capacity_(default_capacity),
       verbose_(_verbose),
       batch_size_(batch_size > 0 ? batch_size : default_capacity),
-      batch_counter_(0),
+      scheduler_(num_threads, batch_size),
       next_engine_id_(0),
       blocking_mode_(blocking)
     {

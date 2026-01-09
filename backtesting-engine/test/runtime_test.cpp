@@ -39,7 +39,7 @@ void test_basic_batch_orders()
     std::cout << "Batch submitted " << successful << "/" << order_ids.size() << " orders successfully" << std::endl;
     assert(successful == 10);
     
-    std::cout << "✓ Basic batch orders test passed" << std::endl;
+    std::cout << "Basic batch orders test passed" << std::endl;
     
     // Reset runtime for next test
     EngineRuntime::get_instance().reset();
@@ -76,7 +76,7 @@ void test_mixed_batch_operations()
     std::cout << "Cancel result: " << (cancel_result ? "success" : "failed") << std::endl;
     std::cout << "Edit result: " << (edit_result != static_cast<OrderId>(-1) ? "success" : "failed") << std::endl;
     
-    std::cout << "✓ Mixed batch operations test passed" << std::endl;
+    std::cout << "Mixed batch operations test passed" << std::endl;
     
     // Reset runtime for next test
     EngineRuntime::get_instance().reset();
@@ -123,7 +123,7 @@ void test_multi_stock_batch()
     std::cout << "Multi-stock batch: " << successful << "/" << results.size() << " orders successful" << std::endl;
     assert(successful == 15);
     
-    std::cout << "✓ Multi-stock batch test passed" << std::endl;
+    std::cout << "Multi-stock batch test passed" << std::endl;
     
     // Reset runtime for next test
     EngineRuntime::get_instance().reset();
@@ -135,15 +135,15 @@ void test_large_batch_performance()
     
     const std::size_t num_orders = 1000000;
     const std::size_t num_workers = 4;
-    const std::size_t batch_size = 10000;  // ✅ Much larger batches
+    const std::size_t batch_size = 10000;  // much larger batches
     
     std::cout << "Configuration: " << num_orders << " orders, " << num_workers 
               << " workers, batch size " << batch_size << std::endl;
     
-    const std::size_t capacity = num_orders * 2;
+    const std::size_t capacity = num_orders;
     const std::size_t ipo_qty = capacity;
     
-    auto& runtime = EngineRuntime::get_instance(num_workers, capacity, 0, false, false);
+    auto& runtime = EngineRuntime::get_instance(num_workers, capacity, capacity, false, true);
     
     std::cout << "Initializing stock with capacity " << capacity << "..." << std::endl;
     assert(runtime.register_stock("SPY", 400.0, ipo_qty, capacity));
@@ -154,26 +154,20 @@ void test_large_batch_performance()
     
     std::cout << "Submitting " << num_orders << " orders..." << std::endl;
     
-    // ✅ Submit ALL orders without waiting between batches
+    // Submit ALL orders without waiting between batches
     for (std::size_t i = 0; i < num_orders; ++i)
     {
         runtime.limit_order("SPY", OrderSide::BID, 390.0 + (i % 100) * 0.1, 1, &results[i]);
         
         if (batch_size > 0 && (i + 1) % batch_size == 0)
         {
-            std::cout << "Batch" << i << "\n";
-            runtime.execute_batch();  // ✅ Non-blocking, doesn't wait
-            std::this_thread::sleep_for(std::chrono::nanoseconds(1000));
+            runtime.execute_batch();
         }
     }
     
-    // ✅ Execute final batch
+    // Execute any remaining orders in the final partial batch (blocking)
     runtime.execute_batch();
-    
-    // ✅ NOW wait for everything to complete (only once!)
-    std::cout << "Waiting for all jobs to complete..." << std::endl;
-    runtime.wait_for_jobs();
-    
+
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     
@@ -186,10 +180,17 @@ void test_large_batch_performance()
     
     std::cout << "Processed " << successful << "/" << num_orders << " orders in " 
               << duration.count() << "ms" << std::endl;
-    std::cout << "Throughput: " << (successful * 1000.0 / duration.count()) 
-              << " orders/sec" << std::endl;
-    
-    std::cout << "✓ Large batch performance test passed" << std::endl;
+    if (duration.count() > 0)
+        std::cout << "Throughput: " << (successful * 1000.0 / duration.count()) 
+                  << " orders/sec" << std::endl;
+    else
+        std::cout << "Throughput: N/A (duration 0ms)" << std::endl;
+
+    // Sanity checks
+    assert(successful == static_cast<int>(num_orders));
+    assert(duration.count() >= 0);
+
+    std::cout << "Large batch performance test passed" << std::endl;
     
     // Reset runtime for next test
     EngineRuntime::get_instance().reset();
@@ -242,7 +243,7 @@ void test_sequential_vs_batch_comparison()
         std::cout << "Batch: " << batch_duration.count() << "ms" << std::endl;
     }
     
-    std::cout << "✓ Sequential vs Batch comparison completed" << std::endl;
+    std::cout << "Sequential vs Batch comparison completed" << std::endl;
     
     // Reset runtime for next test
     EngineRuntime::get_instance().reset();
@@ -253,7 +254,7 @@ void test_non_blocking_multi_stock()
     std::cout << "\n=== Test: Non-Blocking Multi-Stock ===" << std::endl;
     
     const std::size_t num_orders_per_stock = 5000;
-    auto& runtime = EngineRuntime::get_instance(4, 50000, 0, false, false);  // Non-blocking mode
+    auto& runtime = EngineRuntime::get_instance(4, 50000, 0, false, true);  // Blocking mode
     
     // Initialize multiple stocks (use unique tickers)
     assert(runtime.register_stock("QQQ", 400.0, 10000, 20000));
@@ -275,17 +276,13 @@ void test_non_blocking_multi_stock()
         runtime.limit_order("IWM", OrderSide::BID, 2400.0 + (i % 100) * 0.1, 1, &googl_results[i]);
     }
     
-    // Execute all stocks concurrently (non-blocking)
+    // Execute all stocks concurrently (blocking)
     std::cout << "Processing all stocks in parallel..." << std::endl;
     runtime.execute_batch();
     
-    // Wait for all jobs to complete
-    std::cout << "Waiting for all stocks to complete..." << std::endl;
-    runtime.wait_for_jobs();
-    
-    std::cout << "✓ QQQ completed!" << std::endl;
-    std::cout << "✓ DIA completed!" << std::endl;
-    std::cout << "✓ IWM completed!" << std::endl;
+    std::cout << "QQQ completed!" << std::endl;
+    std::cout << "DIA completed!" << std::endl;
+    std::cout << "IWM completed!" << std::endl;
     
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
@@ -307,7 +304,7 @@ void test_non_blocking_multi_stock()
     assert(aapl_success == num_orders_per_stock);
     assert(googl_success == num_orders_per_stock);
     
-    std::cout << "✓ Non-blocking multi-stock test passed" << std::endl;
+    std::cout << "Non-blocking multi-stock test passed" << std::endl;
     
     // Reset runtime for next test
     EngineRuntime::get_instance().reset();
@@ -320,7 +317,7 @@ void test_monte_carlo_simulation()
     const std::size_t num_simulations = 10000;  // Back to 10k
     const std::size_t batch_size = 10000;  // Bigger batches
     
-    auto& runtime = EngineRuntime::get_instance(4, 100000, 0, false, false);
+    auto& runtime = EngineRuntime::get_instance(4, 100000, 0, false, true);
     
     assert(runtime.register_stock("BTC", 50000.0, 100000, 100000));
     runtime.set_auto_match("BTC", false);  // Keep disabled for book analysis
@@ -353,11 +350,8 @@ void test_monte_carlo_simulation()
             runtime.limit_order("BTC", side, price, qty, &results[j]);
         }
         
-        // Execute batch and wait for THIS batch only
+        // Execute batch and wait for THIS batch only (blocking)
         runtime.execute_batch();
-        while (!runtime.stock_completed("BTC")) {
-            std::this_thread::yield();  // Yield instead of busy-wait
-        }
         
         // Optional: Print progress every 10 batches
         if ((i / batch_size) % 10 == 0)
@@ -406,7 +400,7 @@ void test_monte_carlo_simulation()
                   << " | " << std::setw(8) << qty << std::endl;
     }
     
-    std::cout << "✓ Monte Carlo simulation test passed" << std::endl;
+    std::cout << "Monte Carlo simulation test passed" << std::endl;
 }
 
 int main(int argc, char* argv[])
@@ -426,7 +420,7 @@ int main(int argc, char* argv[])
         //test_monte_carlo_simulation();
         
         std::cout << "\n========================================" << std::endl;
-        std::cout << "  ✓ All Tests Passed!" << std::endl;
+    std::cout << "  All Tests Passed!" << std::endl;
         std::cout << "========================================" << std::endl;
     }
     catch (const std::exception& e)
