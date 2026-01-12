@@ -8,21 +8,6 @@
 template <typename T>
 class DoubleBuffer
 {
-private:
-    std::vector<T> buffer_a_;
-    std::vector<T> buffer_b_;
-    
-    // Use atomic pointers to vectors
-    std::atomic<std::vector<T>*> write_buffer_;
-    std::atomic<std::vector<T>*> read_buffer_;
-    
-    std::atomic<bool> swap_requested_{false};
-    
-    std::atomic<std::size_t> read_index_{0};
-    std::atomic<std::size_t> write_index_{0};
-    std::atomic<std::size_t> read_size_{0};
-    std::size_t capacity_;
-    
 public:
     explicit DoubleBuffer(std::size_t capacity) noexcept
     : capacity_(capacity)
@@ -98,6 +83,25 @@ public:
         // Insert new value, and itterate idx
         auto* w = write_buffer_.load(std::memory_order_relaxed);
         (*w)[widx] = std::move(value);
+        write_index_.store(widx + 1, std::memory_order_release);
+        return true;
+    }
+
+    // Construct T directly in buffer using placement new (avoids move)
+    template <typename... Args>
+    bool try_emplace(Args&&... args) noexcept
+    {
+        if (swap_requested_.load(std::memory_order_acquire))
+            return false;
+
+        auto widx = write_index_.load(std::memory_order_relaxed);
+        if (widx >= capacity_) 
+            return false;
+
+        auto* w = write_buffer_.load(std::memory_order_relaxed);
+        // Destroy existing default-constructed element, construct new in place
+        (*w)[widx].~T();
+        new (&(*w)[widx]) T(std::forward<Args>(args)...);
         write_index_.store(widx + 1, std::memory_order_release);
         return true;
     }
@@ -178,4 +182,19 @@ public:
             return 0;
         return size - idx;
     }
+
+private:
+    std::vector<T> buffer_a_;
+    std::vector<T> buffer_b_;
+    
+    // Use atomic pointers to vectors
+    std::atomic<std::vector<T>*> write_buffer_;
+    std::atomic<std::vector<T>*> read_buffer_;
+    
+    std::atomic<bool> swap_requested_{false};
+    
+    std::atomic<std::size_t> read_index_{0};
+    std::atomic<std::size_t> write_index_{0};
+    std::atomic<std::size_t> read_size_{0};
+    std::size_t capacity_;
 };
