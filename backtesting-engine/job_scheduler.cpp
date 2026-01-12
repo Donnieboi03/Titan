@@ -66,6 +66,19 @@ public:
         return worker_id;
     }
 
+    // Submit using placement new (avoids temporary Job + move)
+    template <typename Func>
+    WorkerId submit_job(Func&& func, std::size_t owner_id) noexcept
+    {
+        const WorkerId worker_id = owner_id % num_workers_;
+        auto& buffer = job_queues_[worker_id];
+        
+        while (!buffer.try_emplace(std::forward<Func>(func), owner_id)) 
+            std::this_thread::yield();
+        
+        return worker_id;
+    }
+
     void process_jobs() noexcept
     {
         execute_batch();

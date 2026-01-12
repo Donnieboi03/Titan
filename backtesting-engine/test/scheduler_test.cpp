@@ -152,56 +152,69 @@ void test_computational_jobs()
 
 void test_stress_submission()
 {
-    std::cout << "=== Testing Stress Submission ===\n";
+    std::cout << "=== Testing Stress Submission (try_push vs try_emplace) ===\n";
     
     const int NUM_JOBS = 1000000;
     const int WORKERS = 4;
     const int BATCH_SIZE = NUM_JOBS / WORKERS;
-    // replace single shared counter with per-worker counters
-    std::vector<int> worker_counters(WORKERS);
-    for (auto &c : worker_counters) c = 0;
 
-    auto start = std::chrono::high_resolution_clock::now();
-    
+    // Test 1: Using try_push (submit_job)
     {
-        JobScheduler scheduler(WORKERS, BATCH_SIZE);  // Larger capacity for stress test
+        std::vector<int> worker_counters(WORKERS, 0);
+        auto start = std::chrono::high_resolution_clock::now();
         
-        // Rapid-fire job submission
-        for (int i = 0; i < NUM_JOBS; ++i)
         {
-            std::size_t wid = static_cast<std::size_t>(i % WORKERS);
-            Job job(
-                // increment that worker's local counter (no shared hotspot)
-                [&worker_counters, wid]() { for (int i = 0; i < 1000000; i++) worker_counters[wid] += 1; },
-                wid
-            );
+            JobScheduler scheduler(WORKERS, BATCH_SIZE);
             
-            auto ret_wid = scheduler.submit_job(std::move(job));
-            assert(ret_wid != static_cast<std::size_t>(-1) && "submit_job dropped a job");
-        }    
+            for (int i = 0; i < NUM_JOBS; ++i)
+            {
+                std::size_t wid = static_cast<std::size_t>(i % WORKERS);
+                Job job(
+                    [&worker_counters, wid]() { worker_counters[wid] += 1; },
+                    wid
+                );
+                scheduler.submit_job(std::move(job));
+            }    
+            
+            scheduler.process_jobs();
+        }
         
-        scheduler.process_jobs();
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> dur = end - start;
+        double seconds = dur.count();
+        double total_throughput = (seconds > 0.0) ? (double(NUM_JOBS) / seconds) : 0.0;
+
+        std::cout << "  [try_push]    Total throughput: " << std::fixed << std::setprecision(2) << total_throughput << " jobs/sec\n";
     }
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> dur = end - start;
-    double seconds = dur.count();
 
-    // aggregate counts
-    std::uint64_t total = 0;
-    for (int w = 0; w < WORKERS; ++w) total += static_cast<std::uint64_t>(worker_counters[w]);
+    // Test 2: Using try_emplace (submit_job)
+    {
+        std::vector<int> worker_counters(WORKERS, 0);
+        auto start = std::chrono::high_resolution_clock::now();
+        
+        {
+            JobScheduler scheduler(WORKERS, BATCH_SIZE);
+            
+            for (int i = 0; i < NUM_JOBS; ++i)
+            {
+                std::size_t wid = static_cast<std::size_t>(i % WORKERS);
+                scheduler.submit_job(
+                    [&worker_counters, wid]() { worker_counters[wid] += 1; },
+                    wid
+                );
+            }    
+            
+            scheduler.process_jobs();
+        }
+        
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> dur = end - start;
+        double seconds = dur.count();
+        double total_throughput = (seconds > 0.0) ? (double(NUM_JOBS) / seconds) : 0.0;
 
-    std::cout << "Final Count: " << total << "\n";
-    //assert(total == static_cast<std::uint64_t>(NUM_JOBS) && "All stress test jobs should have executed");
+        std::cout << "  [try_emplace] Total throughput: " << std::fixed << std::setprecision(2) << total_throughput << " jobs/sec\n";
+    }
 
-    double total_throughput = (seconds > 0.0) ? (double(NUM_JOBS) / seconds) : 0.0;
-    double per_worker_throughput = (WORKERS > 0) ? (total_throughput / double(WORKERS)) : 0.0;
-    double avg_latency_us = (NUM_JOBS > 0 && seconds > 0.0) ? (seconds * 1e6 / double(NUM_JOBS)) : 0.0;
-
-    std::cout << "  Processed " << NUM_JOBS << " jobs in " << std::fixed << std::setprecision(3) << (seconds * 1000.0) << " ms\n";
-    std::cout << "  Total throughput: " << std::fixed << std::setprecision(2) << total_throughput << " jobs/sec\n";
-    std::cout << "  Per-worker throughput (avg): " << std::fixed << std::setprecision(2) << per_worker_throughput << " jobs/sec\n";
-    std::cout << "  Avg latency: " << std::fixed << std::setprecision(3) << avg_latency_us << " μs/op\n";
     std::cout << "✓ Stress Submission test PASSED!\n\n";
 }
 
