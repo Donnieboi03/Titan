@@ -12,7 +12,7 @@ struct Heap
 {
 private:
     static constexpr std::size_t ELEMENTS_PER_LINE = 64 / sizeof(T); // L1 Cache Line Size
-    static constexpr std::size_t RESERVED_SIZE = ELEMENTS_PER_LINE * 128; // Default Buffer Size
+    static constexpr std::size_t RESERVED_SIZE = ELEMENTS_PER_LINE * 256; // Default Buffer Size
 
 public:
     Heap() noexcept

@@ -77,7 +77,7 @@ public:
 
         // Check if write idx is at capacity
         auto widx = write_index_.load(std::memory_order_relaxed);
-        if (widx >= capacity_) 
+        if (widx >= capacity_)
             return false;
 
         // Insert new value, and itterate idx
@@ -95,7 +95,7 @@ public:
             return false;
 
         auto widx = write_index_.load(std::memory_order_relaxed);
-        if (widx >= capacity_) 
+        if (widx >= capacity_)
             return false;
 
         auto* w = write_buffer_.load(std::memory_order_relaxed);
@@ -106,21 +106,21 @@ public:
         return true;
     }
     
-    void flush() noexcept
+    bool try_flush() noexcept
     {
         // Check if write idx is 0
         auto write_sz = write_index_.load(std::memory_order_acquire);
-        if (write_sz == 0) 
-            return;
+        if (write_sz == 0)
+            return true;
+
+        // Check if consumer has drained the current read buffer
+        if (read_index_.load(std::memory_order_acquire) < read_size_.load(std::memory_order_acquire))
+            return false; // Consumer not ready, try again later
 
         // Ask consumer to finish the current read buffer
         swap_requested_.store(true, std::memory_order_release);
 
-        // Wait until consumer drained read buffer
-        while (read_index_.load(std::memory_order_acquire) < read_size_.load(std::memory_order_acquire))
-            std::this_thread::yield();
-
-        // Swap buffers
+        // Swap buffers immediately (consumer should be drained)
         auto* w = write_buffer_.load(std::memory_order_relaxed);
         auto* r = read_buffer_.load(std::memory_order_relaxed);
         write_buffer_.store(r, std::memory_order_relaxed);
@@ -133,6 +133,7 @@ public:
 
         // Swap complete
         swap_requested_.store(false, std::memory_order_release);
+        return true;
     }
     
     bool try_pop(T& out) noexcept
@@ -140,13 +141,7 @@ public:
         std::size_t idx  = read_index_.load(std::memory_order_acquire);
         std::size_t size = read_size_.load(std::memory_order_acquire);
 
-        if (idx >= size) 
-        {
-            // If producer is waiting to swap, yield to let it proceed
-            if (swap_requested_.load(std::memory_order_acquire))
-                std::this_thread::yield();
-            return false;
-        }
+        if (idx >= size) return false;
 
         // Pop into out, and itterate idx
         auto* r = read_buffer_.load(std::memory_order_relaxed);
@@ -186,13 +181,13 @@ public:
 private:
     std::vector<T> buffer_a_;
     std::vector<T> buffer_b_;
-    
+
     // Use atomic pointers to vectors
     std::atomic<std::vector<T>*> write_buffer_;
     std::atomic<std::vector<T>*> read_buffer_;
-    
+
     std::atomic<bool> swap_requested_{false};
-    
+
     std::atomic<std::size_t> read_index_{0};
     std::atomic<std::size_t> write_index_{0};
     std::atomic<std::size_t> read_size_{0};

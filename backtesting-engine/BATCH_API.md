@@ -110,7 +110,7 @@ runtime.execute_batch();
 - **No Race Conditions**: Submit and process phases are separate
 
 ### Memory Management
-- Uses **Arena allocator** for job arguments (stable addresses, no reallocation)
+- Uses **Memory Pool allocator** for job arguments (stable addresses, no reallocation)
 - Pre-allocated arena capacity avoids allocation overhead
 - Automatic cleanup when EngineRuntime is destroyed
 
@@ -138,7 +138,7 @@ struct Job
 
 ### Internal Components
 - **JobScheduler**: Staged batch scheduler with worker thread pool
-- **ArgsArena**: Arena<OrderJobArgs> for stable memory addresses
+- **ArgsMemoryPool**: MemoryPool<OrderJobArgs> for stable memory addresses
 - **EngineIdMap**: Maps ticker → engine_id for job routing
 - **RingBuffer**: Lock-free queue for job storage (per worker)
 

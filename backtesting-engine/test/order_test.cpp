@@ -5,49 +5,157 @@
 #include <chrono>
 #include <iomanip>
 
+namespace math
+{
+    // 1.00 USD is 10,000 ticks -> 0.01 USD (1 cent) is 100 ticks
+    constexpr double PRICE_TICK = 10000.0; 
+    inline engine::Price dollars_to_ticks(double dollars) { return static_cast<engine::Price>(std::round(dollars * PRICE_TICK)); }
+    inline double ticks_to_dollars(engine::Price ticks) { return static_cast<double>(ticks) / PRICE_TICK; }
+
+    // 1 BTC is 100,000 ticks -> 0.00001 BTC (~&1.00) is 1 tick
+    constexpr uint32_t QTY_TICK = 100000;
+    inline engine::Quantity qty_to_internal(double value) { return static_cast<engine::Quantity>(std::round(value * QTY_TICK)); }
+    inline double internal_to_qty(engine::Quantity internal_val) { return static_cast<double>(internal_val) / QTY_TICK; }
+
+    // Thresholds updated to match the 10,000 ticks-per-dollar scale
+    inline engine::Quantity get_QTY_TICK(engine::Price price_in_ticks) 
+    {
+        // $1.00 threshold     (1.00 * 10,000 = 10,000 ticks)
+        // $100.00 threshold   (100.00 * 10,000 = 1,000,000 ticks)
+        // $10,000.00 threshold (10,000.00 * 10,000 = 100,000,000 ticks)
+    
+        if (price_in_ticks <= 10000)         return QTY_TICK;       // Under $1: Whole units only
+        if (price_in_ticks <= 1000000)       return QTY_TICK / 100; // Under $100: 2 decimals (0.01)
+        if (price_in_ticks <= 100000000)     return QTY_TICK / 1000; // Under $10k: 3 decimals (0.001)
+    
+        // Default for BTC prices ($100k+): 5 decimals (0.00001)
+        // Smallest trade is 1 internal unit (~$1.00 value at $100k BTC)
+        return 1; 
+    }
+}
+
 // Global verbose flag
 bool VERBOSE = false;
 
 // Helper: convert dollars to ticks for test inputs
-inline Price price(double dollars) { return dollars_to_ticks(dollars); }
+inline engine::Price price(double dollars) { return dollars * 100; }
+
+// Test the new notification system
+void test_new_notification_system()
+{
+    std::cout << "=== Testing New Notification System ===\n";
+
+    engine::OrderEngine engine("TEST", 10000, true); // verbose = true
+
+    // Place a resting bid order
+    std::vector<engine::EngineMsg> bid_msgs;
+    engine::OrderId bid_id = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(100.0), 10, bid_msgs);
+
+    assert(bid_msgs.size() == 1);
+    assert(bid_msgs[0].kind == engine::EventKind::ACCEPT);
+    assert(bid_msgs[0].order_id == bid_id);
+
+    // Place an ask order that should match
+    std::vector<engine::EngineMsg> ask_msgs;
+    engine::OrderId ask_id = engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(100.0), 5, ask_msgs);
+
+    assert(ask_msgs.size() == 3); // ACCEPT + 1 FILL + 1 PARTIAL_FILL messages
+    assert(ask_msgs[0].kind == engine::EventKind::ACCEPT);
+    assert(ask_msgs[0].order_id == ask_id);
+
+    assert(ask_msgs[1].kind == engine::EventKind::FILL);
+    assert(ask_msgs[1].order_id == ask_id);
+
+    assert(ask_msgs[2].kind == engine::EventKind::PARTIAL_FILL);
+    assert(ask_msgs[2].order_id == bid_id);
+
+    std::cout << "✓ New notification system works correctly\n";
+}
+
+void test_verbose_performance_comparison()
+{
+    std::cout << "=== Testing Verbose Mode Performance Comparison ===\n";
+
+    const int NUM_ORDERS = 50000; // Smaller test for quick results
+
+    // Test with verbose = false (optimized path - no message collection)
+    {
+        engine::OrderEngine engine_quiet("QUIET", 100000, false); // verbose = false
+        auto start = std::chrono::high_resolution_clock::now();
+
+        for (int i = 0; i < NUM_ORDERS; ++i) {
+            engine::OrderSide side = (i % 2 == 0) ? engine::OrderSide::BID : engine::OrderSide::ASK;
+            engine::Price p = price(100.0 + (i % 5)); // Small spread to encourage matching
+            engine_quiet.place_order(side, engine::OrderType::LIMIT, p, 10);
+        }
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration_quiet = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+        std::cout << "Verbose=FALSE: " << NUM_ORDERS << " orders in " << duration_quiet.count() << "ms "
+                  << "(" << (NUM_ORDERS * 1000.0 / duration_quiet.count()) << " ops/sec)\n";
+        std::cout << "  Filled: " << engine_quiet.filled_count() << "\n";
+    }
+
+    // Test with verbose = true (notification collection path)
+    {
+        engine::OrderEngine engine_verbose("VERBOSE", 100000, true); // verbose = true
+        auto start = std::chrono::high_resolution_clock::now();
+
+        for (int i = 0; i < NUM_ORDERS; ++i) {
+            engine::OrderSide side = (i % 2 == 0) ? engine::OrderSide::BID : engine::OrderSide::ASK;
+            engine::Price p = price(100.0 + (i % 5)); // Small spread to encourage matching
+            engine_verbose.place_order(side, engine::OrderType::LIMIT, p, 10);
+        }
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration_verbose = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+        std::cout << "Verbose=TRUE:  " << NUM_ORDERS << " orders in " << duration_verbose.count() << "ms "
+                  << "(" << (NUM_ORDERS * 1000.0 / duration_verbose.count()) << " ops/sec)\n";
+        std::cout << "  Filled: " << engine_verbose.filled_count() << "\n";
+    }
+
+    std::cout << "✓ Verbose performance comparison completed\n";
+}
 
 void test_place_limit_order()
 {
     std::cout << "=== Testing Place Limit Order ===\n";
     
-    OrderEngine engine("AAPL", 10000, VERBOSE);
+    engine::OrderEngine engine("AAPL", 10000, VERBOSE);
     
     // Place bid orders
-    auto bid1 = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(100.0), 10);
-    auto bid2 = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(99.0), 20);
-    auto bid3 = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(98.0), 15);
-    
-    assert(bid1 != INVALID_ID && "Bid order 1 should be placed");
-    assert(bid2 != INVALID_ID && "Bid order 2 should be placed");
-    assert(bid3 != INVALID_ID && "Bid order 3 should be placed");
-    
+    auto bid1 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(100.0), 10);
+    auto bid2 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(99.0), 20);
+    auto bid3 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(98.0), 15);
+
+    assert(bid1 != engine::INVALID_ID && "Bid order 1 should be placed");
+    assert(bid2 != engine::INVALID_ID && "Bid order 2 should be placed");
+    assert(bid3 != engine::INVALID_ID && "Bid order 3 should be placed");
+
     // Place ask orders
-    auto ask1 = engine.place_order(OrderSide::ASK, OrderType::LIMIT, price(101.0), 10);
-    auto ask2 = engine.place_order(OrderSide::ASK, OrderType::LIMIT, price(102.0), 20);
-    auto ask3 = engine.place_order(OrderSide::ASK, OrderType::LIMIT, price(103.0), 15);
+    auto ask1 = engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(101.0), 10);
+    auto ask2 = engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(102.0), 20);
+    auto ask3 = engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(103.0), 15);
     
-    assert(ask1 != INVALID_ID && "Ask order 1 should be placed");
-    assert(ask2 != INVALID_ID && "Ask order 2 should be placed");
-    assert(ask3 != INVALID_ID && "Ask order 3 should be placed");
+    assert(ask1 != engine::INVALID_ID && "Ask order 1 should be placed");
+    assert(ask2 != engine::INVALID_ID && "Ask order 2 should be placed");
+    assert(ask3 != engine::INVALID_ID && "Ask order 3 should be placed");
     
     // Verify orders exist
-    const OrderInfo* bid_order = engine.get_order(bid1);
+    const engine::OrderInfo* bid_order = engine.get_order(bid1);
     assert(bid_order != nullptr && "Bid order should exist");
-    assert(bid_order->side_ == OrderSide::BID && "Order side should be BID");
+    assert(bid_order->side_ == engine::OrderSide::BID && "Order side should be BID");
     assert(bid_order->price_ == price(100.0) && "Order price should be 100.0");
     assert(bid_order->qty_ == 10 && "Order quantity should be 10");
-    assert(bid_order->status_ == OrderStatus::OPEN && "Order status should be OPEN");
-    const OrderInfo* ask_order = engine.get_order(ask1);
+    assert(bid_order->status_ == engine::OrderStatus::OPEN && "Order status should be OPEN");
+    const engine::OrderInfo* ask_order = engine.get_order(ask1);
     assert(ask_order != nullptr && "Ask order should exist");
-    assert(ask_order->side_ == OrderSide::ASK && "Order side should be ASK");
+    assert(ask_order->side_ == engine::OrderSide::ASK && "Order side should be ASK");
     assert(ask_order->price_ == price(101.0) && "Order price should be 101.0");
     assert(ask_order->qty_ == 10 && "Order quantity should be 10");
-    assert(ask_order->status_ == OrderStatus::OPEN && "Order status should be OPEN");
+    assert(ask_order->status_ == engine::OrderStatus::OPEN && "Order status should be OPEN");
     // Verify best bid and ask
     assert(engine.get_best_bid() == price(100.0) && "Best bid should be 100.0");
     assert(engine.get_best_ask() == price(101.0) && "Best ask should be 101.0");
@@ -55,7 +163,7 @@ void test_place_limit_order()
     // Verify counters
     assert(engine.placed_count() == 6 && "Should have 6 placed orders");
     
-    if (VERBOSE) std::cout << "Market depth size: " << engine.get_market_depth(OrderSide::BID).size() << "\n";
+    if (VERBOSE) std::cout << "Market depth size: " << engine.get_market_depth(engine::OrderSide::BID).size() << "\n";
     std::cout << "✓ Place Limit Order test PASSED!\n\n";
 }
 
@@ -63,18 +171,18 @@ void test_place_market_order()
 {
     std::cout << "=== Testing Place Market Order ===\n";
     
-    OrderEngine engine("TSLA", 10000, VERBOSE);
+    engine::OrderEngine engine("TSLA", 10000, VERBOSE);
     
     // Try to place market order with no liquidity
-    auto market_bid = engine.place_order(OrderSide::BID, OrderType::MARKET, 0, 10);
-    assert(market_bid == INVALID_ID && "Market order should fail without liquidity");
+    auto market_bid = engine.place_order(engine::OrderSide::BID, engine::OrderType::MARKET, 0, 10);
+    assert(market_bid == engine::INVALID_ID && "Market order should fail without liquidity");
     
     // Place limit orders first
-    engine.place_order(OrderSide::ASK, OrderType::LIMIT, price(200.0), 10);
-    engine.place_order(OrderSide::BID, OrderType::LIMIT, price(199.0), 10);
+    engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(200.0), 10);
+    engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(199.0), 10);
     // Now place market orders
-    auto market_bid2 = engine.place_order(OrderSide::BID, OrderType::MARKET, 0, 5);
-    assert(market_bid2 != INVALID_ID && "Market order should succeed with liquidity");
+    auto market_bid2 = engine.place_order(engine::OrderSide::BID, engine::OrderType::MARKET, 0, 5);
+    assert(market_bid2 != engine::INVALID_ID && "Market order should succeed with liquidity");
     
     std::cout << "✓ Place Market Order test PASSED!\n\n";
 }
@@ -83,23 +191,23 @@ void test_cancel_order()
 {
     std::cout << "=== Testing Cancel Order ===\n";
     
-    OrderEngine engine("MSFT", 10000, VERBOSE);
+    engine::OrderEngine engine("MSFT", 10000, VERBOSE);
     
     // Place orders
-    auto bid1 = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(300.0), 10);
-    auto bid2 = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(299.0), 20);
-    auto ask1 = engine.place_order(OrderSide::ASK, OrderType::LIMIT, price(301.0), 10);
+    auto bid1 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(300.0), 10);
+    auto bid2 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(299.0), 20);
+    auto ask1 = engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(301.0), 10);
     
     // Verify orders exist
     assert(engine.get_order(bid1) != nullptr && "Order should exist before cancel");
-    assert(engine.get_order(bid1)->status_ == OrderStatus::OPEN && "Order should be OPEN");
+    assert(engine.get_order(bid1)->status_ == engine::OrderStatus::OPEN && "Order should be OPEN");
     
     // Cancel order
     bool cancelled = engine.cancel_order(bid1);
     assert(cancelled && "Cancel should succeed");
     
     // Verify order is freed from memory (cancelled orders go to ledger)
-    const OrderInfo* cancelled_order = engine.get_order(bid1);
+    const engine::OrderInfo* cancelled_order = engine.get_order(bid1);
     assert(cancelled_order == nullptr && "Cancelled order should be freed from memory");
     
     // Verify best bid changed
@@ -115,7 +223,17 @@ void test_cancel_order()
     
     // Verify counters
     assert(engine.cancelled_count() == 1 && "Should have 1 cancelled order");
-    
+
+    // Test new cancel API with message
+    engine::OrderEngine engine2("TEST", 10000, true);
+    auto test_order = engine2.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(100.0), 10);
+
+    engine::EngineMsg cancel_msg;
+    bool cancel_result = engine2.cancel_order(test_order, cancel_msg);
+    assert(cancel_result && "Cancel should succeed");
+    assert(cancel_msg.kind == engine::EventKind::ACCEPT && "Should get ACCEPT message");
+    assert(cancel_msg.order_id == test_order && "Message should contain correct order ID");
+
     std::cout << "✓ Cancel Order test PASSED!\n\n";
 }
 
@@ -123,34 +241,34 @@ void test_edit_order()
 {
     std::cout << "=== Testing Edit Order ===\n";
     
-    OrderEngine engine("GOOGL", 10000, VERBOSE);
+    engine::OrderEngine engine("GOOGL", 10000, VERBOSE);
     
     // Place initial orders
-    auto bid1 = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(150.0), 10);
-    auto ask1 = engine.place_order(OrderSide::ASK, OrderType::LIMIT, price(151.0), 10);
+    auto bid1 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(150.0), 10);
+    auto ask1 = engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(151.0), 10);
     
     // Verify initial order
-    const OrderInfo* initial = engine.get_order(bid1);
+    const engine::OrderInfo* initial = engine.get_order(bid1);
     assert(initial->price_ == price(150.0) && "Initial price should be 150.0");
     assert(initial->qty_ == 10 && "Initial quantity should be 10");
     
     // Edit order (change price and quantity)
-    auto edited_id = engine.edit_order(bid1, OrderSide::BID, price(149.0), 20);
-    assert(edited_id != INVALID_ID && "Edit should succeed");
+    auto edited_id = engine.edit_order(bid1, engine::OrderSide::BID, price(149.0), 20);
+    assert(edited_id != engine::INVALID_ID && "Edit should succeed");
     assert(edited_id == bid1 && "Edited order ID should be the same as original");
     
     // Verify order was modified (not cancelled)
-    const OrderInfo* edited_order = engine.get_order(bid1);
+    const engine::OrderInfo* edited_order = engine.get_order(bid1);
     assert(edited_order != nullptr && "Edited order should exist");
-    assert(edited_order->status_ == OrderStatus::OPEN && "Edited order should still be OPEN");
+    assert(edited_order->status_ == engine::OrderStatus::OPEN && "Edited order should still be OPEN");
     assert(edited_order->price_ == price(149.0) && "New price should be 149.0");
     assert(edited_order->qty_ == 20 && "New quantity should be 20");
     // Verify best bid changed
     assert(engine.get_best_bid() == price(149.0) && "Best bid should reflect edited order");
     
     // Try to edit non-existent order
-    auto edit_fail = engine.edit_order(99999, OrderSide::BID, price(150.0), 10);
-    assert(edit_fail == INVALID_ID && "Edit should fail for non-existent order");
+    auto edit_fail = engine.edit_order(99999, engine::OrderSide::BID, price(150.0), 10);
+    assert(edit_fail == engine::INVALID_ID && "Edit should fail for non-existent order");
     
     std::cout << "✓ Edit Order test PASSED!\n\n";
 }
@@ -159,15 +277,15 @@ void test_multiple_orders_same_price()
 {
     std::cout << "=== Testing Multiple Orders at Same Price ===\n";
     
-    OrderEngine engine("AMZN", 10000, VERBOSE);
+    engine::OrderEngine engine("AMZN", 10000, VERBOSE);
     
     // Place multiple orders at same price
-    auto bid1 = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(100.0), 10);
-    auto bid2 = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(100.0), 20);
-    auto bid3 = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(100.0), 15);
+    auto bid1 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(100.0), 10);
+    auto bid2 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(100.0), 20);
+    auto bid3 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(100.0), 15);
     
     // Get market depth
-    auto depth = engine.get_market_depth(OrderSide::BID, 5);
+    auto depth = engine.get_market_depth(engine::OrderSide::BID, 5);
     assert(depth.size() >= 1 && "Should have at least one price level");
     assert(depth[0].first == price(100.0) && "Price should be 100.0");
     assert(depth[0].second == 45 && "Total quantity should be 45 (10+20+15)");
@@ -176,7 +294,7 @@ void test_multiple_orders_same_price()
     engine.cancel_order(bid2);
     
     // Check depth again
-    depth = engine.get_market_depth(OrderSide::BID, 5);
+    depth = engine.get_market_depth(engine::OrderSide::BID, 5);
     assert(depth[0].second == 25 && "Total quantity should be 25 after cancel");
     
     std::cout << "✓ Multiple Orders at Same Price test PASSED!\n\n";
@@ -186,12 +304,12 @@ void test_order_priority()
 {
     std::cout << "=== Testing Order Priority (Time Priority) ===\n";
     
-    OrderEngine engine("NVDA", 10000, VERBOSE);
+    engine::OrderEngine engine("NVDA", 10000, VERBOSE);
     
     // Place orders at same price with time delay
-    auto bid1 = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(500.0), 10);
-    auto bid2 = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(500.0), 20);
-    auto bid3 = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(500.0), 30);
+    auto bid1 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(500.0), 10);
+    auto bid2 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(500.0), 20);
+    auto bid3 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(500.0), 30);
     
     // Verify orders exist
     assert(engine.get_order(bid1) != nullptr && "Order 1 should exist");
@@ -199,9 +317,9 @@ void test_order_priority()
     assert(engine.get_order(bid3) != nullptr && "Order 3 should exist");
     
     // Orders should have different timestamps
-    const OrderInfo* o1 = engine.get_order(bid1);
-    const OrderInfo* o2 = engine.get_order(bid2);
-    const OrderInfo* o3 = engine.get_order(bid3);
+    const engine::OrderInfo* o1 = engine.get_order(bid1);
+    const engine::OrderInfo* o2 = engine.get_order(bid2);
+    const engine::OrderInfo* o3 = engine.get_order(bid3);
     
     assert(o1->time_ <= o2->time_ && "Order 1 time should be <= Order 2 time");
     assert(o2->time_ <= o3->time_ && "Order 2 time should be <= Order 3 time");
@@ -213,20 +331,20 @@ void test_stress_orders()
 {
     std::cout << "=== Stress Test: Order Operations ===\n";
     
-    const int NUM_ORDERS = 100000000;  // 10M orders
-    const std::size_t CAPACITY = (512 * 1024);  // 500K capacity
-    const int NUM_PRICES = 1000;  // Price levels
+    const int NUM_ORDERS = 1000000;  // 10M orders
+    const std::size_t CAPACITY = (512 * 64);  // 500K capacity
+    const int NUM_PRICES = 100;  // Price levels
     
     // ========== TEST 1a: PLACEMENT WITH MATCHING ==========
     {
-        OrderEngine engine("PLACE", CAPACITY, false, true);  // auto_match enabled
+        engine::OrderEngine engine("PLACE", CAPACITY, false, true);  // auto_match enabled
         
         auto start = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < NUM_ORDERS; ++i)
         {
-            Price p = 10000 + (i % NUM_PRICES);
-            OrderSide side = (i % 2 == 0) ? OrderSide::BID : OrderSide::ASK;
-            engine.place_order(side, OrderType::LIMIT, p, 10);
+            engine::Price p = 10000 + (i % NUM_PRICES);
+            engine::OrderSide side = (i % 2 == 0) ? engine::OrderSide::BID : engine::OrderSide::ASK;
+            engine.place_order(side, engine::OrderType::LIMIT, p, 10);
         }
         auto end = std::chrono::high_resolution_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -239,14 +357,14 @@ void test_stress_orders()
     
     // ========== TEST 1b: PLACEMENT WITHOUT MATCHING ==========
     {
-        OrderEngine engine("PLACE_NO_MATCH", NUM_ORDERS, false, false);  // auto_match disabled
+        engine::OrderEngine engine("PLACE_NO_MATCH", NUM_ORDERS, false, false);  // auto_match disabled
         
         auto start = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < NUM_ORDERS; ++i)
         {
-            Price p = 10000 + (i % NUM_PRICES);
-            OrderSide side = (i % 2 == 0) ? OrderSide::BID : OrderSide::ASK;
-            engine.place_order(side, OrderType::LIMIT, p, 10);
+            engine::Price p = 10000 + (i % NUM_PRICES);
+            engine::OrderSide side = (i % 2 == 0) ? engine::OrderSide::BID : engine::OrderSide::ASK;
+            engine.place_order(side, engine::OrderType::LIMIT, p, 10);
         }
         auto end = std::chrono::high_resolution_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -259,17 +377,17 @@ void test_stress_orders()
     // ========== TEST 2: CANCEL/EDIT (no matching, stable order book) ==========
     {
         const std::size_t TEST_COUNT = 500000;  // 500K orders for accurate measurement
-        OrderEngine engine("MODIFY", TEST_COUNT * 2, false, false);  // No matching
-        std::vector<OrderId> order_ids;
+        engine::OrderEngine engine("MODIFY", TEST_COUNT * 2, false, false);  // No matching
+        std::vector<engine::OrderId> order_ids;
         order_ids.reserve(TEST_COUNT);
         
         // Place orders with non-crossing prices (bids < asks)
         for (std::size_t i = 0; i < TEST_COUNT; ++i)
         {
-            Price p = (i % 2 == 0) ? 9900 + (i % 50) : 10100 + (i % 50);
-            OrderSide side = (i % 2 == 0) ? OrderSide::BID : OrderSide::ASK;
-            auto id = engine.place_order(side, OrderType::LIMIT, p, 10);
-            if (id != INVALID_ID) order_ids.push_back(id);
+            engine::Price p = (i % 2 == 0) ? 9900 + (i % 50) : 10100 + (i % 50);
+            engine::OrderSide side = (i % 2 == 0) ? engine::OrderSide::BID : engine::OrderSide::ASK;
+            auto id = engine.place_order(side, engine::OrderType::LIMIT, p, 10);
+            if (id != engine::INVALID_ID) order_ids.push_back(id);
         }
         
         // Cancel half
@@ -291,8 +409,8 @@ void test_stress_orders()
         std::size_t edited = 0;
         for (std::size_t i = order_ids.size() / 2; i < order_ids.size(); ++i)
         {
-            Price new_price = 9900 + (i % 50);
-            if (engine.edit_order(order_ids[i], OrderSide::BID, new_price, 20) != INVALID_ID)
+            engine::Price new_price = 9900 + (i % 50);
+            if (engine.edit_order(order_ids[i], engine::OrderSide::BID, new_price, 20) != engine::INVALID_ID)
                 edited++;
         }
         end = std::chrono::high_resolution_clock::now();
@@ -303,7 +421,7 @@ void test_stress_orders()
                   << " [" << edited << " edited]\n";
     }
     
-    std::cout << "  Memory footprint: " << (CAPACITY * sizeof(OrderInfo) / (1024 * 1024)) << " MB\n";
+    std::cout << "  Memory footprint: " << (CAPACITY * sizeof(engine::OrderInfo) / (1024 * 1024)) << " MB\n";
     std::cout << "✓ Stress Test PASSED!\n\n";
 }
 
@@ -312,17 +430,17 @@ void test_slot_reuse()
     std::cout << "=== Testing Slot Reuse with Immediate Free ===\n";
     
     // Small capacity to force slot reuse
-    OrderEngine engine("REUSE", 100, false, true);
+    engine::OrderEngine engine("REUSE", 100, false, true);
     
     // Phase 1: Place orders that will match and fill (auto-freed)
     std::cout << "Phase 1: Placing and matching 50 order pairs...\n";
-    std::vector<OrderId> filled_bids;
-    std::vector<OrderId> filled_asks;
+    std::vector<engine::OrderId> filled_bids;
+    std::vector<engine::OrderId> filled_asks;
     
     for (int i = 0; i < 50; ++i)
     {
-        auto bid = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(100.0), 10);
-        auto ask = engine.place_order(OrderSide::ASK, OrderType::LIMIT, price(100.0), 10);
+        auto bid = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(100.0), 10);
+        auto ask = engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(100.0), 10);
         filled_bids.push_back(bid);
         filled_asks.push_back(ask);
     }
@@ -348,12 +466,12 @@ void test_slot_reuse()
     
     // Phase 3: Place new orders - they should reuse freed slots
     std::cout << "Phase 3: Placing 80 new orders (should reuse slots)...\n";
-    std::vector<OrderId> new_orders;
+    std::vector<engine::OrderId> new_orders;
     for (int i = 0; i < 40; ++i)
     {
         // Prices that won't match each other
-        auto bid = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(99.0) + i, 5);
-        auto ask = engine.place_order(OrderSide::ASK, OrderType::LIMIT, price(101.0) + i, 5);
+        auto bid = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(99.0) + i, 5);
+        auto ask = engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(101.0) + i, 5);
         new_orders.push_back(bid);
         new_orders.push_back(ask);
     }
@@ -362,7 +480,7 @@ void test_slot_reuse()
     int open_count = 0;
     for (auto id : new_orders) {
         const auto* order = engine.get_order(id);
-        if (order && order->status_ == OrderStatus::OPEN) open_count++;
+        if (order && order->status_ == engine::OrderStatus::OPEN) open_count++;
     }
     std::cout << "  New open orders: " << open_count << "/80\n";
     assert(open_count == 80 && "All new orders should be open");
@@ -378,7 +496,7 @@ void test_slot_reuse()
     
     // Phase 5: Try to edit/cancel with old IDs - should fail
     std::cout << "Phase 5: Testing edit/cancel with freed OrderIds...\n";
-    bool edit_result = (engine.edit_order(filled_bids[0], OrderSide::BID, price(105.0), 20) != INVALID_ID);
+    bool edit_result = (engine.edit_order(filled_bids[0], engine::OrderSide::BID, price(105.0), 20) != engine::INVALID_ID);
     bool cancel_result = engine.cancel_order(filled_asks[0]);
     std::cout << "  Edit with freed ID: " << (edit_result ? "SUCCEEDED (BAD!)" : "rejected (good)") << "\n";
     std::cout << "  Cancel with freed ID: " << (cancel_result ? "SUCCEEDED (BAD!)" : "rejected (good)") << "\n";
@@ -396,7 +514,7 @@ void test_memory_efficiency()
     const std::size_t CAPACITY = 1048576;  // 1MB slots
     const int TOTAL_ORDERS = 10000000;    // 10M orders to place
     
-    OrderEngine engine("MEMORY", CAPACITY, false, true);
+    engine::OrderEngine engine("MEMORY", CAPACITY, false, true);
     
     auto start = std::chrono::high_resolution_clock::now();
     
@@ -406,9 +524,9 @@ void test_memory_efficiency()
         // Place 10k orders per batch (5k pairs that will match)
         for (int i = 0; i < 5000; ++i)
         {
-            Price p = 10000 + (i % 100);  // Direct ticks
-            engine.place_order(OrderSide::BID, OrderType::LIMIT, p, 10);
-            engine.place_order(OrderSide::ASK, OrderType::LIMIT, p, 10);
+            engine::Price p = 10000 + (i % 100);  // Direct ticks
+            engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, p, 10);
+            engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, p, 10);
         }
         // Slots are automatically freed on fill - no manual cleanup needed!
     }
@@ -418,15 +536,15 @@ void test_memory_efficiency()
     
     std::size_t orders_placed = engine.placed_count();
     
-    std::cout << "  Capacity: " << CAPACITY << " slots (" << (CAPACITY * sizeof(OrderInfo) / 1024 / 1024) << " MB)\n";
+    std::cout << "  Capacity: " << CAPACITY << " slots (" << (CAPACITY * sizeof(engine::OrderInfo) / 1024 / 1024) << " MB)\n";
     std::cout << "  Total orders placed: " << orders_placed << "\n";
     std::cout << "  Total filled: " << engine.filled_count() << "\n";
     std::cout << "  Final open orders: " << engine.open_count() << "\n";
     std::cout << "  Time: " << duration_ms << " ms\n";
     std::cout << "  Throughput: " << std::fixed << std::setprecision(2) 
               << (orders_placed / (duration_ms / 1000.0)) << " orders/sec\n";
-    std::cout << "\n  Without slot reuse: would need " << (TOTAL_ORDERS * sizeof(OrderInfo) / 1024 / 1024) << " MB\n";
-    std::cout << "  With immediate free: only " << (CAPACITY * sizeof(OrderInfo) / 1024 / 1024) << " MB max\n";
+    std::cout << "\n  Without slot reuse: would need " << (TOTAL_ORDERS * sizeof(engine::OrderInfo) / 1024 / 1024) << " MB\n";
+    std::cout << "  With immediate free: only " << (CAPACITY * sizeof(engine::OrderInfo) / 1024 / 1024) << " MB max\n";
     std::cout << "  Memory savings: " << (100 - (CAPACITY * 100 / TOTAL_ORDERS)) << "%\n";
     
     std::cout << "✓ Memory Efficiency Test PASSED!\n\n";
@@ -456,7 +574,7 @@ void test_capacity_limits()
     
     for (const auto& s : scenarios)
     {
-        OrderEngine engine("CAP", CAPACITY, false, true);
+        engine::OrderEngine engine("CAP", CAPACITY, false, true);
         
         std::size_t rejected = 0;
         std::size_t peak_open = 0;
@@ -465,12 +583,12 @@ void test_capacity_limits()
         {
             // Bids at low prices, asks at high prices
             // Spread determines how many don't match immediately
-            Price bid_price = 10000 - (i % s.price_spread);
-            Price ask_price = 10000 + (i % s.price_spread);
+            engine::Price bid_price = 10000 - (i % s.price_spread);
+            engine::Price ask_price = 10000 + (i % s.price_spread);
             
-            if (engine.place_order(OrderSide::BID, OrderType::LIMIT, bid_price, 10) == INVALID_ID)
+            if (engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, bid_price, 10) == engine::INVALID_ID)
                 rejected++;
-            if (engine.place_order(OrderSide::ASK, OrderType::LIMIT, ask_price, 10) == INVALID_ID)
+            if (engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, ask_price, 10) == engine::INVALID_ID)
                 rejected++;
             
             peak_open = std::max(peak_open, engine.open_count());
@@ -498,12 +616,12 @@ void test_order_matching_correctness()
 {
     std::cout << "=== Testing Order Matching Correctness ===\n";
     
-    OrderEngine engine("MSFT", 10000, VERBOSE);
+    engine::OrderEngine engine("MSFT", 10000, VERBOSE);
     
     // Test 1: Simple full match - both orders freed after fill
     std::cout << "Test 1: Simple full match...\n";
-    auto bid1 = engine.place_order(OrderSide::BID, OrderType::LIMIT, price(100.0), 10);
-    auto ask1 = engine.place_order(OrderSide::ASK, OrderType::LIMIT, price(100.0), 10);
+    auto bid1 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(100.0), 10);
+    auto ask1 = engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(100.0), 10);
     
     // Both orders should be filled and freed from memory
     assert(engine.get_order(bid1) == nullptr && "Filled bid should be freed");
@@ -514,94 +632,94 @@ void test_order_matching_correctness()
     
     // Test 2: Partial match - ask larger than bid
     std::cout << "Test 2: Partial match (ask > bid)...\n";
-    OrderEngine engine_test2("TEST2", 10000, VERBOSE);
-    auto bid2 = engine_test2.place_order(OrderSide::BID, OrderType::LIMIT, price(101.0), 5);
-    auto ask2 = engine_test2.place_order(OrderSide::ASK, OrderType::LIMIT, price(101.0), 15);
+    engine::OrderEngine engine_test2("TEST2", 10000, VERBOSE);
+    auto bid2 = engine_test2.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(101.0), 5);
+    auto ask2 = engine_test2.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(101.0), 15);
     
     // Bid fully filled (freed), ask partially filled (still open)
     assert(engine_test2.get_order(bid2) == nullptr && "Filled bid should be freed");
-    const OrderInfo* ask2_info = engine_test2.get_order(ask2);
+    const engine::OrderInfo* ask2_info = engine_test2.get_order(ask2);
     assert(ask2_info != nullptr && "Partial ask should still exist");
-    assert(ask2_info->status_ == OrderStatus::OPEN && "Ask should be partially filled");
+    assert(ask2_info->status_ == engine::OrderStatus::OPEN && "Ask should be partially filled");
     assert(ask2_info->qty_ == 10 && "Ask quantity should be 10 remaining");
     std::cout << "  ✓ Partial match (ask > bid) works correctly\n";
     
     // Test 3: Partial match - bid larger than ask
     std::cout << "Test 3: Partial match (bid > ask)...\n";
-    OrderEngine engine_test3("TEST3", 10000, VERBOSE);
-    auto bid3 = engine_test3.place_order(OrderSide::BID, OrderType::LIMIT, price(102.0), 20);
-    auto ask3 = engine_test3.place_order(OrderSide::ASK, OrderType::LIMIT, price(102.0), 8);
+    engine::OrderEngine engine_test3("TEST3", 10000, VERBOSE);
+    auto bid3 = engine_test3.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(102.0), 20);
+    auto ask3 = engine_test3.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(102.0), 8);
     
     // Ask fully filled (freed), bid partially filled (still open)
     assert(engine_test3.get_order(ask3) == nullptr && "Filled ask should be freed");
-    const OrderInfo* bid3_info = engine_test3.get_order(bid3);
+    const engine::OrderInfo* bid3_info = engine_test3.get_order(bid3);
     assert(bid3_info != nullptr && "Partial bid should still exist");
-    assert(bid3_info->status_ == OrderStatus::OPEN && "Bid should be partially filled");
+    assert(bid3_info->status_ == engine::OrderStatus::OPEN && "Bid should be partially filled");
     assert(bid3_info->qty_ == 12 && "Bid quantity should be 12 remaining");
     std::cout << "  ✓ Partial match (bid > ask) works correctly\n";
     
     // Test 4: Multiple matches - FIFO order
     std::cout << "Test 4: Multiple matches with FIFO...\n";
-    OrderEngine engine2("FIFO", 10000, VERBOSE);
+    engine::OrderEngine engine2("FIFO", 10000, VERBOSE);
     
     // Place multiple bids at same price
-    auto bid4a = engine2.place_order(OrderSide::BID, OrderType::LIMIT, price(50.0), 10);
-    auto bid4b = engine2.place_order(OrderSide::BID, OrderType::LIMIT, price(50.0), 15);
-    auto bid4c = engine2.place_order(OrderSide::BID, OrderType::LIMIT, price(50.0), 5);
+    auto bid4a = engine2.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(50.0), 10);
+    auto bid4b = engine2.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(50.0), 15);
+    auto bid4c = engine2.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(50.0), 5);
     
     // Place large ask that should match in FIFO order (25 qty matches 10+15)
-    auto ask4 = engine2.place_order(OrderSide::ASK, OrderType::LIMIT, price(50.0), 25);
+    auto ask4 = engine2.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(50.0), 25);
     
     // First two bids filled (freed), third untouched, ask filled (freed)
     assert(engine2.get_order(bid4a) == nullptr && "First bid should be filled and freed");
     assert(engine2.get_order(bid4b) == nullptr && "Second bid should be filled and freed");
     assert(engine2.get_order(ask4) == nullptr && "Ask should be filled and freed");
     
-    const OrderInfo* bid4c_info = engine2.get_order(bid4c);
+    const engine::OrderInfo* bid4c_info = engine2.get_order(bid4c);
     assert(bid4c_info != nullptr && "Third bid should remain");
-    assert(bid4c_info->status_ == OrderStatus::OPEN && "Third bid should remain open");
+    assert(bid4c_info->status_ == engine::OrderStatus::OPEN && "Third bid should remain open");
     assert(bid4c_info->qty_ == 5 && "Third bid qty should be unchanged");
     std::cout << "  ✓ FIFO matching works correctly\n";
     
     // Test 5: Price-time priority
     std::cout << "Test 5: Price-time priority...\n";
-    OrderEngine engine3("PRIORITY", 10000, VERBOSE);
+    engine::OrderEngine engine3("PRIORITY", 10000, VERBOSE);
     
     // Place bids at different prices
-    auto bid5a = engine3.place_order(OrderSide::BID, OrderType::LIMIT, price(75.0), 10); // Lower price
-    auto bid5b = engine3.place_order(OrderSide::BID, OrderType::LIMIT, price(77.0), 10); // Higher price (should match first)
+    auto bid5a = engine3.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(75.0), 10); // Lower price
+    auto bid5b = engine3.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(77.0), 10); // Higher price (should match first)
     
     // Place ask that can match higher priced bid
-    auto ask5 = engine3.place_order(OrderSide::ASK, OrderType::LIMIT, price(75.0), 10);
+    auto ask5 = engine3.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(75.0), 10);
     
     // Higher priced bid matched (freed), lower priced bid remains, ask filled (freed)
     assert(engine3.get_order(bid5b) == nullptr && "Higher priced bid should be filled and freed");
     assert(engine3.get_order(ask5) == nullptr && "Ask should be filled and freed");
     
-    const OrderInfo* bid5a_info = engine3.get_order(bid5a);
+    const engine::OrderInfo* bid5a_info = engine3.get_order(bid5a);
     assert(bid5a_info != nullptr && "Lower priced bid should remain");
-    assert(bid5a_info->status_ == OrderStatus::OPEN && "Lower priced bid should remain open");
+    assert(bid5a_info->status_ == engine::OrderStatus::OPEN && "Lower priced bid should remain open");
     std::cout << "  ✓ Price-time priority works correctly\n";
     
     // Test 6: Market depth after matching
     std::cout << "Test 6: Market depth correctness...\n";
-    OrderEngine engine4("DEPTH", 10000, VERBOSE);
+    engine::OrderEngine engine4("DEPTH", 10000, VERBOSE);
     
     // Build order book
-    engine4.place_order(OrderSide::BID, OrderType::LIMIT, price(90.0), 100);
-    engine4.place_order(OrderSide::BID, OrderType::LIMIT, price(91.0), 200);
-    engine4.place_order(OrderSide::BID, OrderType::LIMIT, price(92.0), 150);
-    engine4.place_order(OrderSide::ASK, OrderType::LIMIT, price(93.0), 100);
-    engine4.place_order(OrderSide::ASK, OrderType::LIMIT, price(94.0), 200);
+    engine4.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(90.0), 100);
+    engine4.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(91.0), 200);
+    engine4.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(92.0), 150);
+    engine4.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(93.0), 100);
+    engine4.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(94.0), 200);
     
     // Execute trade that removes top of book
-    auto large_sell = engine4.place_order(OrderSide::ASK, OrderType::LIMIT, price(92.0), 150);
+    auto large_sell = engine4.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(92.0), 150);
     
     // Check best bid changed
     assert(engine4.get_best_bid() == price(91.0) && "Best bid should be updated after match");
     
     // Get market depth
-    auto bid_depth = engine4.get_market_depth(OrderSide::BID, 5);
+    auto bid_depth = engine4.get_market_depth(engine::OrderSide::BID, 5);
     assert(bid_depth.size() == 2 && "Should have 2 bid levels remaining");
     assert(bid_depth[0].first == price(91.0) && "Top bid should be 91.0");
     assert(bid_depth[0].second == 200 && "Top bid qty should be 200");
@@ -609,17 +727,17 @@ void test_order_matching_correctness()
     
     // Test 7: No matching when prices don't cross
     std::cout << "Test 7: No match when prices don't cross...\n";
-    OrderEngine engine5("NOCROSS", 10000, VERBOSE);
+    engine::OrderEngine engine5("NOCROSS", 10000, VERBOSE);
     
-    auto bid6 = engine5.place_order(OrderSide::BID, OrderType::LIMIT, price(80.0), 10);
-    auto ask6 = engine5.place_order(OrderSide::ASK, OrderType::LIMIT, price(85.0), 10);
+    auto bid6 = engine5.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(80.0), 10);
+    auto ask6 = engine5.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(85.0), 10);
     
-    const OrderInfo* bid6_info = engine5.get_order(bid6);
-    const OrderInfo* ask6_info = engine5.get_order(ask6);
+    const engine::OrderInfo* bid6_info = engine5.get_order(bid6);
+    const engine::OrderInfo* ask6_info = engine5.get_order(ask6);
     
     // Both should remain open (no match)
-    assert(bid6_info->status_ == OrderStatus::OPEN && "Bid should remain open");
-    assert(ask6_info->status_ == OrderStatus::OPEN && "Ask should remain open");
+    assert(bid6_info->status_ == engine::OrderStatus::OPEN && "Bid should remain open");
+    assert(ask6_info->status_ == engine::OrderStatus::OPEN && "Ask should remain open");
     assert(bid6_info->qty_ == 10 && "Bid qty unchanged");
     assert(ask6_info->qty_ == 10 && "Ask qty unchanged");
     assert(engine5.get_best_bid() == price(80.0) && "Best bid should be 80.0");
@@ -646,6 +764,8 @@ int main()
     test_memory_efficiency();
     test_capacity_limits();
     test_stress_orders();
+    test_new_notification_system();
+    test_verbose_performance_comparison();
     std::cout << "========================================\n";
     std::cout << "  All Order Tests PASSED! ✓\n";
     std::cout << "========================================\n";

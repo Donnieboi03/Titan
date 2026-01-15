@@ -5,6 +5,7 @@
 #include <chrono>
 #include <atomic>
 #include <iomanip>
+#include <thread>
 
 void test_basic_job_submission()
 {
@@ -12,30 +13,30 @@ void test_basic_job_submission()
     std::atomic<int> counter{0};
     
     {
-        JobScheduler scheduler(3, 1000);
+        scheduler::JobScheduler scheduler(3, 1000);
         
-        Job job1(
-            [&counter]() { 
+        auto job1 = scheduler::make_job(
+            [&counter]() {
                 std::cout << "Job 1 executing\n";
-                counter.fetch_add(1, std::memory_order_relaxed); 
+                counter.fetch_add(1, std::memory_order_relaxed);
             },
-            0
+            0U
         );
-        
-        Job job2(
-            [&counter]() { 
+
+        auto job2 = scheduler::make_job(
+            [&counter]() {
                 std::cout << "Job 2 executing\n";
-                counter.fetch_add(1, std::memory_order_relaxed); 
+                counter.fetch_add(1, std::memory_order_relaxed);
             },
-            1
+            1U
         );
-        
-        Job job3(
-            [&counter]() { 
+
+        auto job3 = scheduler::make_job(
+            [&counter]() {
                 std::cout << "Job 3 executing\n";
-                counter.fetch_add(1, std::memory_order_relaxed); 
+                counter.fetch_add(1, std::memory_order_relaxed);
             },
-            2
+            2U
         );
         
         std::cout << "Submitting jobs...\n";
@@ -60,13 +61,13 @@ void test_multiple_jobs_same_worker()
     const int NUM_JOBS = 100;
     
     {
-        JobScheduler scheduler(4, 1000);
+        scheduler::JobScheduler scheduler(4, 1000);
         
         for (int i = 0; i < NUM_JOBS; ++i)
         {
-            Job job(
+            auto job = scheduler::make_job(
                 [&counter]() { counter.fetch_add(1, std::memory_order_relaxed); },
-                0  // All to worker 0
+                0U  // All to worker 0
             );
             scheduler.submit_job(std::move(job));
         }
@@ -88,15 +89,15 @@ void test_round_robin_distribution()
     std::atomic<int> counter{0};
     
     {
-        JobScheduler scheduler(NUM_WORKERS, 1000);
+        scheduler::JobScheduler scheduler(NUM_WORKERS, 1000);
     
     
         // Distribute jobs round-robin across workers
         for (int i = 0; i < NUM_JOBS; ++i)
         {
-            Job job(
+            auto job = scheduler::make_job(
                 [&counter]() { counter.fetch_add(1, std::memory_order_relaxed); },
-                static_cast<std::size_t>(i % NUM_WORKERS)
+                static_cast<uint32_t>(i % NUM_WORKERS)
             );
             scheduler.submit_job(std::move(job));
         }
@@ -118,13 +119,13 @@ void test_computational_jobs()
     auto start = std::chrono::high_resolution_clock::now();
     
     {
-        JobScheduler scheduler(4, 1000);
+        scheduler::JobScheduler scheduler(4, 1000);
     
         // Submit computational jobs across all workers
         for (int i = 0; i < NUM_JOBS; ++i)
         {
             int value = i;
-            Job job(
+            auto job = scheduler::make_job(
                 [&counter, value]() {
                     volatile int result = 0;
                     for (int j = 0; j < 1000; ++j)
@@ -133,7 +134,7 @@ void test_computational_jobs()
                     }
                     counter.fetch_add(1, std::memory_order_relaxed);
                 },
-                static_cast<std::size_t>(i % 4)
+                static_cast<uint32_t>(i % 4)
             );
             scheduler.submit_job(std::move(job));
         }
@@ -152,67 +153,181 @@ void test_computational_jobs()
 
 void test_stress_submission()
 {
-    std::cout << "=== Testing Stress Submission (try_push vs try_emplace) ===\n";
-    
-    const int NUM_JOBS = 1000000;
-    const int WORKERS = 4;
-    const int BATCH_SIZE = NUM_JOBS / WORKERS;
+    std::cout << "=== Testing Raw Throughput: Multi-Batch vs Single-Batch (emplace only) ===\n";
 
-    // Test 1: Using try_push (submit_job)
+    const int NUM_JOBS = 1024 * 1024 * 1024;
+    const int WORKERS = 4;
+    const int NUM_BATCHES = 256;
+    const int JOBS_PER_BATCH = NUM_JOBS / NUM_BATCHES;
+
+    // Test 1: Multi-batch async processing (streaming jobs)
     {
         std::vector<int> worker_counters(WORKERS, 0);
         auto start = std::chrono::high_resolution_clock::now();
-        
+
         {
-            JobScheduler scheduler(WORKERS, BATCH_SIZE);
-            
-            for (int i = 0; i < NUM_JOBS; ++i)
+            scheduler::JobScheduler scheduler(WORKERS, JOBS_PER_BATCH);
+
+            for (int batch = 0; batch < NUM_BATCHES; ++batch)
             {
-                std::size_t wid = static_cast<std::size_t>(i % WORKERS);
-                Job job(
-                    [&worker_counters, wid]() { worker_counters[wid] += 1; },
-                    wid
-                );
-                scheduler.submit_job(std::move(job));
-            }    
-            
-            scheduler.process_jobs();
+                // Submit jobs for this batch using emplace
+                for (int i = 0; i < JOBS_PER_BATCH; ++i)
+                {
+                    int global_job_idx = batch * JOBS_PER_BATCH + i;
+                    std::size_t wid = static_cast<std::size_t>(global_job_idx % WORKERS);
+                    scheduler.submit_job(scheduler::make_job(
+                        [&worker_counters, wid]() {
+                            int result = 0;
+                            for (int j = 0; j < 100; ++j)
+                            {
+                                result += j * wid;
+                            }
+                            worker_counters[wid] += 1;
+                        },
+                        static_cast<uint32_t>(wid)
+                    ));
+                }
+
+                // Process this batch asynchronously
+                scheduler.process_jobs_async();
+            }
+
+            // Wait for all async processing to complete
+            while (!scheduler.is_complete()) {
+                std::this_thread::yield();
+            }
         }
-        
+
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> dur = end - start;
         double seconds = dur.count();
         double total_throughput = (seconds > 0.0) ? (double(NUM_JOBS) / seconds) : 0.0;
 
-        std::cout << "  [try_push]    Total throughput: " << std::fixed << std::setprecision(2) << total_throughput << " jobs/sec\n";
+        std::cout << "  [MULTI-BATCH ASYNC]  Total throughput: " << std::fixed << std::setprecision(2) << total_throughput << " jobs/sec\n";
+        std::cout << "  Streaming " << NUM_BATCHES << " batches asynchronously\n";
     }
 
-    // Test 2: Using try_emplace (submit_job)
+    // Test 2: Sync processing with multiple batches
     {
         std::vector<int> worker_counters(WORKERS, 0);
         auto start = std::chrono::high_resolution_clock::now();
-        
+
         {
-            JobScheduler scheduler(WORKERS, BATCH_SIZE);
-            
-            for (int i = 0; i < NUM_JOBS; ++i)
+            scheduler::JobScheduler scheduler(WORKERS, JOBS_PER_BATCH);
+
+            for (int batch = 0; batch < NUM_BATCHES; ++batch)
             {
-                std::size_t wid = static_cast<std::size_t>(i % WORKERS);
-                scheduler.submit_job(
-                    [&worker_counters, wid]() { worker_counters[wid] += 1; },
-                    wid
-                );
-            }    
-            
-            scheduler.process_jobs();
+                // Submit jobs for this batch using emplace
+                for (int i = 0; i < JOBS_PER_BATCH; ++i)
+                {
+                    int global_job_idx = batch * JOBS_PER_BATCH + i;
+                    std::size_t wid = static_cast<std::size_t>(global_job_idx % WORKERS);
+                    scheduler.submit_job(scheduler::make_job(
+                        [&worker_counters, wid]() {
+                            int result = 0;
+                            for (int j = 0; j < 100; ++j)
+                            {
+                                result += j * wid;
+                            }
+                            worker_counters[wid] += 1;
+                        },
+                        static_cast<uint32_t>(wid)
+                    ));
+                }
+
+                // Process this batch synchronously
+                scheduler.process_jobs();
+            }
         }
-        
+
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> dur = end - start;
         double seconds = dur.count();
         double total_throughput = (seconds > 0.0) ? (double(NUM_JOBS) / seconds) : 0.0;
 
-        std::cout << "  [try_emplace] Total throughput: " << std::fixed << std::setprecision(2) << total_throughput << " jobs/sec\n";
+        std::cout << "  [MULTI-BATCH SYNC]   Total throughput: " << std::fixed << std::setprecision(2) << total_throughput << " jobs/sec\n";
+        std::cout << "  Processing " << NUM_BATCHES << " batches synchronously\n";
+    }
+
+    // Test 3: Single batch processing (traditional approach)
+    {
+        std::vector<int> worker_counters(WORKERS, 0);
+        auto start = std::chrono::high_resolution_clock::now();
+
+        {
+            scheduler::JobScheduler scheduler(WORKERS, JOBS_PER_BATCH);
+
+            // Submit all jobs at once using emplace
+            for (int i = 0; i < NUM_JOBS; ++i)
+            {
+                std::size_t wid = static_cast<std::size_t>(i % WORKERS);
+                scheduler.submit_job(scheduler::make_job(
+                    [&worker_counters, wid]() {
+                        int result = 0;
+                        for (int j = 0; j < 100; ++j)
+                        {
+                            result += j * wid;
+                        }
+                        worker_counters[wid] += 1;
+                    },
+                    static_cast<uint32_t>(wid)
+                ));
+            }
+
+            // Process all jobs asynchronously
+            scheduler.process_jobs_async();
+
+            // Wait for completion
+            while (!scheduler.is_complete()) {
+                std::this_thread::yield();
+            }
+        }
+
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> dur = end - start;
+        double seconds = dur.count();
+        double total_throughput = (seconds > 0.0) ? (double(NUM_JOBS) / seconds) : 0.0;
+
+        std::cout << "  [SINGLE-BATCH ASYNC] Total throughput: " << std::fixed << std::setprecision(2) << total_throughput << " jobs/sec\n";
+        std::cout << "  Bulk submit single batch asynchronously\n";
+    }
+
+    // Test 4: Single-batch sync processing
+    {
+        std::vector<int> worker_counters(WORKERS, 0);
+        auto start = std::chrono::high_resolution_clock::now();
+
+        {
+            scheduler::JobScheduler scheduler(WORKERS, JOBS_PER_BATCH);
+
+            // Submit all jobs at once using emplace
+            for (int i = 0; i < NUM_JOBS; ++i)
+            {
+                std::size_t wid = static_cast<std::size_t>(i % WORKERS);
+                scheduler.submit_job(scheduler::make_job(
+                    [&worker_counters, wid]() {
+                        int result = 0;
+                        for (int j = 0; j < 100; ++j)
+                        {
+                            result += j * wid;
+                        }
+                        worker_counters[wid] += 1;
+                    },
+                    static_cast<uint32_t>(wid)
+                ));
+            }
+
+            // Process all jobs synchronously
+            scheduler.process_jobs();
+        }
+
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> dur = end - start;
+        double seconds = dur.count();
+        double total_throughput = (seconds > 0.0) ? (double(NUM_JOBS) / seconds) : 0.0;
+
+        std::cout << "  [SINGLE-BATCH SYNC]  Total throughput: " << std::fixed << std::setprecision(2) << total_throughput << " jobs/sec\n";
+        std::cout << "  Bulk submit single batch synchronously\n";
     }
 
     std::cout << "✓ Stress Submission test PASSED!\n\n";
@@ -222,15 +337,15 @@ void test_empty_check()
 {
     std::cout << "=== Testing Empty Check ===\n";
     
-    JobScheduler scheduler(4, 1000);
+    scheduler::JobScheduler scheduler(4, 1000);
     
     // Initially should be empty
     assert(scheduler.is_complete() && "Scheduler should be empty initially");
     
     std::atomic<int> counter{0};
-    Job job(
+    auto job = scheduler::make_job(
         [&counter]() { counter.fetch_add(1, std::memory_order_relaxed); },
-        0
+        0U
     );
     
     scheduler.submit_job(std::move(job));
@@ -275,11 +390,11 @@ void test_sequential_vs_parallel()
     auto par_start = std::chrono::high_resolution_clock::now();
     
     {
-        JobScheduler scheduler(NUM_WORKERS, NUM_JOBS / NUM_WORKERS);
+        scheduler::JobScheduler scheduler(NUM_WORKERS, NUM_JOBS / NUM_WORKERS);
         for (int i = 0; i < NUM_JOBS; ++i)
         {
             int value = i;
-            Job job(
+            auto job = scheduler::make_job(
                 [&par_counter, value]() {
                     volatile int result = 0;
                     for (int j = 0; j < 1000; ++j)
@@ -288,7 +403,7 @@ void test_sequential_vs_parallel()
                     }
                     par_counter.fetch_add(1, std::memory_order_relaxed);
                 },
-                static_cast<std::size_t>(i % NUM_WORKERS)
+                static_cast<uint32_t>(i % NUM_WORKERS)
             );
             scheduler.submit_job(std::move(job));
         }
