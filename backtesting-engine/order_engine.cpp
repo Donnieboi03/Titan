@@ -6,6 +6,7 @@
 #include <iostream>
 #include <chrono>
 #include <vector>
+#include <algorithm>
 
 namespace engine
 {
@@ -67,6 +68,11 @@ namespace engine
     using LevelMap = std::unordered_map<Price, OrderLevel>;
     using BidBook = Heap<Price, HeapType::MAX>;
     using AskBook = Heap<Price, HeapType::MIN>;
+    
+    // Top-K depth tracking (K = number of levels to track)
+    constexpr std::size_t DEPTH_K = 10;
+    using TopBidHeap = Heap<Price, HeapType::MAX>; // Top K bid prices
+    using TopAskHeap = Heap<Price, HeapType::MIN>; // Top K ask prices
 
     enum class EventKind : uint8_t 
     {
@@ -100,14 +106,51 @@ namespace engine
         EngineMsg(EventKind k, RejectReason rr) : kind(k), reject(rr) {}
     };
 
+    // Lock-free market snapshot for instant reads
+    struct MarketSnapshot
+    {
+        Price best_bid;
+        Price best_ask;
+        Price market_price;      // Last trade execution price
+        Quantity bid_depth[10];  // Top 10 bid levels
+        Quantity ask_depth[10];  // Top 10 ask levels
+        Price bid_prices[10];
+        Price ask_prices[10];
+        std::uint8_t bid_levels;
+        std::uint8_t ask_levels;
+        std::size_t placed_count;   // Total orders placed
+        std::size_t cancelled_count; // Total orders cancelled
+        std::size_t filled_count;    // Total orders filled
+        std::size_t open_count;      // Current open orders
+
+        MarketSnapshot() noexcept
+            : best_bid(-1), best_ask(-1), market_price(-1),
+              bid_levels(0), ask_levels(0),
+              placed_count(0), cancelled_count(0), filled_count(0), open_count(0)
+        {
+            for (int i = 0; i < 10; ++i) 
+            {
+                bid_depth[i] = 0;
+                ask_depth[i] = 0;
+                bid_prices[i] = 0;
+                ask_prices[i] = 0;
+            }
+        }
+    };
+
     class OrderEngine
     {
     public:
-        OrderEngine(const std::string& ticker, std::size_t capacity = 1048576, bool verbose = true, bool auto_match = true) noexcept
+        OrderEngine(std::size_t capacity = 1048576, bool verbose = true, bool auto_match = true,
+                   std::size_t snapshot_update_interval = 0) noexcept
         : order_pool_(capacity), recent_order_id_(INVALID_ID),
         placed_count_(0), cancelled_count_(0), filled_count_(0),
-        verbose_(verbose), auto_match_(auto_match), ticker_(ticker), last_trade_price_(-1)
+        verbose_(verbose), auto_match_(auto_match), last_trade_price_(-1), active_snapshot_(0), 
+        snapshot_update_interval_(snapshot_update_interval), operations_since_snapshot_(0)
         {
+            // Initialize both snapshots
+            snapshots_[0] = MarketSnapshot();
+            snapshots_[1] = MarketSnapshot();
         }
 
         // POST: Place Order (price in ticks) - returns all messages in vector
@@ -131,7 +174,6 @@ namespace engine
         // POST: Cancel Order - overload without msg for backward compatibility
         bool cancel_order(OrderId id) noexcept
         {
-            static EngineMsg dummy_msg; // Ignored
             return cancel_order_impl(id, nullptr);
         }
 
@@ -152,90 +194,31 @@ namespace engine
         // GET: Get Auto Match Flag
         bool get_auto_match() const noexcept { return auto_match_; }
         
-        // GET: Get Order (returns nullptr if invalid/freed)
-        const OrderInfo* get_order(OrderId id) const noexcept { return order_pool_.get(id); }
-
-        // GET: Market Price (last trade price)
-        Price get_market_price() const noexcept { return last_trade_price_; }
-
-        // GET: Best Ask
-        Price get_best_ask() const noexcept
+        // POST: Set Snapshot Update Interval (0 = manual only, N = update every N operations)
+        void set_snapshot_update_interval(std::size_t interval) noexcept { snapshot_update_interval_ = interval; }
+        // GET: Get Snapshot Update Interval
+        std::size_t get_snapshot_update_interval() const noexcept { return snapshot_update_interval_; }
+        
+        // Lock-free snapshot access (instant reads, no blocking)
+        const MarketSnapshot& get_snapshot() const noexcept
         {
-            if (ask_book_.empty()) return -1;
-            return ask_book_.peek();
-        }
-
-        // GET: Best Bid
-        Price get_best_bid() const noexcept
-        {
-            if (bid_book_.empty()) return -1;
-            return bid_book_.peek();
+            int read_idx = active_snapshot_.load(std::memory_order_acquire);
+            return snapshots_[read_idx];
         }
         
-        // GET: Market Depth
-        std::vector<std::pair<Price, Quantity>> get_market_depth(OrderSide side, std::size_t depth = 10) const
-        {
-            std::vector<std::pair<Price, Quantity>> depth_result;
-
-            switch(side)
+        // POST: Manually update snapshot (respects interval to avoid redundant updates)
+        void update_snapshot() noexcept 
+        { 
+            // Only update if interval is 0 (manual mode) or enough operations have occurred
+            if (snapshot_update_interval_ == 0 || operations_since_snapshot_ > 0)
             {
-                case OrderSide::BID:
-                    {
-                        BidBook tmp_book = bid_book_; // Copy BidsBook
-                        for (size_t i = 0; i < depth && tmp_book.size(); ++i)
-                        {
-                            Price best_bid = tmp_book.peek(); // Get Best Bid Price
-                            OrderLevel best_level = bid_levels_.at(best_bid); // Get Best Bid Level
-
-                            Quantity total_qty = 0;
-                            // Sum up all Quantities on current price level
-                            while (best_level.size() > 0)
-                            {
-                                OrderId oid = best_level.peek().second;
-                                if (order_pool_.is_valid(oid))
-                                    total_qty += order_pool_[oid].qty_;
-                                best_level.pop();
-                            }
-
-                            depth_result.emplace_back(best_bid, total_qty);
-                            tmp_book.pop();
-                        }
-                        break;
-                    }
-
-                case OrderSide::ASK:
-                    {
-                        AskBook tmp_book = ask_book_; // Copy AsksBook
-                        for (size_t i = 0; i < depth && tmp_book.size(); ++i)
-                        {
-                            Price best_ask = tmp_book.peek(); // Get Best Ask Price
-                            OrderLevel best_level = ask_levels_.at(best_ask); // Get Best Ask Level
-
-                            Quantity total_qty = 0;
-                            // Sum up all Quantities on current price level
-                            while (best_level.size() > 0)
-                            {
-                                OrderId oid = best_level.peek().second;
-                                if (order_pool_.is_valid(oid))
-                                    total_qty += order_pool_[oid].qty_;
-                                best_level.pop();
-                            }
-
-                            depth_result.emplace_back(best_ask, total_qty);
-                            tmp_book.pop();
-                        }
-                        break;
-                    }
+                update_snapshot_impl();
+                operations_since_snapshot_ = 0;
             }
-
-            return depth_result;
         }
 
-        // Counters for correctness verification
-        std::size_t placed_count() const noexcept { return placed_count_; }
-        std::size_t cancelled_count() const noexcept { return cancelled_count_; }
-        std::size_t filled_count() const noexcept { return filled_count_; }
-        std::size_t open_count() const noexcept { return order_pool_.active_count(); }
+        // GET: Get Order (returns nullptr if invalid/freed)
+        const OrderInfo* get_order(OrderId id) const noexcept { return order_pool_.get(id); }
 
     private:
         OrderId place_order_impl(OrderSide side, OrderType type, Price price, Quantity qty, std::vector<EngineMsg>* msgs) noexcept
@@ -286,8 +269,21 @@ namespace engine
             }
 
             // Attempt to match the new order (if auto-matching is enabled)
-            if (auto_match_)
+            if (auto_match_) 
+            {
                 matching_engine(msgs);
+            }
+
+            // Auto-update snapshot based on interval (0 = manual only)
+            if (snapshot_update_interval_ > 0) 
+            {
+                ++operations_since_snapshot_;
+                if (operations_since_snapshot_ >= snapshot_update_interval_) 
+                {
+                    update_snapshot_impl();
+                    operations_since_snapshot_ = 0;
+                }
+            }
 
             return id; // Return Order ID (generational handle)
         }
@@ -365,8 +361,21 @@ namespace engine
             }
 
             // Attempt to match the modified order (if auto-matching is enabled)
-            if (auto_match_)
+            if (auto_match_) 
+            {
                 matching_engine(msgs);
+            }
+
+            // Auto-update snapshot based on interval
+            if (snapshot_update_interval_ > 0) 
+            {
+                ++operations_since_snapshot_;
+                if (operations_since_snapshot_ >= snapshot_update_interval_) 
+                {
+                    update_snapshot_impl();
+                    operations_since_snapshot_ = 0;
+                }
+            }
 
             return id; // Return Order ID
         }
@@ -374,31 +383,101 @@ namespace engine
         // Push order into book at given price level
         void push_into_book(OrderSide side, Price price, Timestamp time, OrderId id) noexcept
         {
+            const Quantity qty = order_pool_[id].qty_;
+            
             if (side == OrderSide::BID) // BID
             {
                 // Use O(1) map lookup 
-                if (bid_levels_.find(price) == bid_levels_.end())
+                const bool new_level = (bid_levels_.find(price) == bid_levels_.end());
+                if (new_level)
                 {
                     bid_book_.push(price);
                     bid_levels_[price] = OrderLevel();
+                    bid_depth_cache_[price] = 0;
+                    
+                    // Eagerly update top-K bid heap
+                    if (top_bid_heap_.size() < DEPTH_K)
+                    {
+                        top_bid_heap_.push(price);
+                    }
+                    else
+                    {
+                        // Find min of top-K (worst bid in top-K)
+                        Price worst_price = top_bid_heap_.peek();
+                        int worst_idx = 0;
+                        for (int i = 1; i < top_bid_heap_.size(); ++i)
+                        {
+                            if (top_bid_heap_.peek(i) < worst_price)
+                            {
+                                worst_price = top_bid_heap_.peek(i);
+                                worst_idx = i;
+                            }
+                        }
+                        if (price > worst_price)
+                        {
+                            top_bid_heap_.pop(worst_idx);
+                            top_bid_heap_.push(price);
+                        }
+                    }
                 }
                 bid_levels_[price].emplace(time, id);
+                bid_depth_cache_[price] += qty; // Incremental depth update
             }
             else
             {
                 // Use O(1) map lookup 
-                if (ask_levels_.find(price) == ask_levels_.end())
+                const bool new_level = (ask_levels_.find(price) == ask_levels_.end());
+                if (new_level)
                 {
                     ask_book_.push(price);
                     ask_levels_[price] = OrderLevel();
+                    ask_depth_cache_[price] = 0;
+                    
+                    // Eagerly update top-K ask heap
+                    if (top_ask_heap_.size() < DEPTH_K)
+                    {
+                        top_ask_heap_.push(price);
+                    }
+                    else
+                    {
+                        // Find max of top-K (worst ask in top-K)
+                        Price worst_price = top_ask_heap_.peek();
+                        int worst_idx = 0;
+                        for (int i = 1; i < top_ask_heap_.size(); ++i)
+                        {
+                            if (top_ask_heap_.peek(i) > worst_price)
+                            {
+                                worst_price = top_ask_heap_.peek(i);
+                                worst_idx = i;
+                            }
+                        }
+                        if (price < worst_price)
+                        {
+                            top_ask_heap_.pop(worst_idx);
+                            top_ask_heap_.push(price);
+                        }
+                    }
                 }
                 ask_levels_[price].emplace(time, id);
+                ask_depth_cache_[price] += qty; // Incremental depth update
             }
         }
         
         // Pop order from book at given price level
         void pop_from_book(OrderSide side, Price price, Timestamp time, OrderId id) noexcept
         {
+            const Quantity qty = order_pool_[id].qty_;
+            
+            // Update depth cache
+            if (side == OrderSide::BID)
+            {
+                bid_depth_cache_[price] -= qty;
+            }
+            else
+            {
+                ask_depth_cache_[price] -= qty;
+            }
+            
             OrderLevel& price_level = (side == OrderSide::BID) ? bid_levels_[price] : ask_levels_[price];
             price_level.pop(price_level.find(std::pair<Timestamp, OrderId>(time, id)));
             
@@ -409,12 +488,28 @@ namespace engine
                     const auto idx = bid_book_.find(price);
                     if (idx != -1) bid_book_.pop(idx);
                     bid_levels_.erase(price);
+                    bid_depth_cache_.erase(price);
+                    
+                    // Remove from top-K heap if present (O(N) with find)
+                    int top_idx = top_bid_heap_.find(price);
+                    if (top_idx != -1)
+                    {
+                        top_bid_heap_.pop(top_idx);
+                    }
                 }
                 else // ASK
                 {
                     const auto idx = ask_book_.find(price);
                     if (idx != -1) ask_book_.pop(idx);
                     ask_levels_.erase(price);
+                    ask_depth_cache_.erase(price);
+                    
+                    // Remove from top-K heap if present (O(N) with find)
+                    int top_idx = top_ask_heap_.find(price);
+                    if (top_idx != -1)
+                    {
+                        top_ask_heap_.pop(top_idx);
+                    }
                 }
             }
         }
@@ -482,6 +577,10 @@ namespace engine
             // Calculate fill quantity
             const Quantity qty_filled = std::min(best_ask.qty_, best_bid.qty_);
             
+            // Update depth cache for partial fills
+            ask_depth_cache_[best_ask.price_] -= qty_filled;
+            bid_depth_cache_[best_bid.price_] -= qty_filled;
+            
             // Update quantities
             best_ask.qty_ -= qty_filled;
             best_bid.qty_ -= qty_filled;
@@ -499,8 +598,12 @@ namespace engine
                 best_ask_level.pop();
                 if (best_ask_level.empty())
                 {
+                    // Adjust Ask Books
                     ask_book_.pop();
                     ask_levels_.erase(best_ask.price_);
+                    // Adjust Top K
+                    top_ask_heap_.pop();
+                    ask_depth_cache_.erase(best_ask.price_);
                 }
 
                 // Set status before freeing
@@ -524,8 +627,12 @@ namespace engine
                 best_bid_level.pop();
                 if (best_bid_level.empty())
                 {
+                    // Adjust Bid Books
                     bid_book_.pop();
                     bid_levels_.erase(best_bid.price_);
+                    // Adjust Top K
+                    top_bid_heap_.pop();
+                    bid_depth_cache_.erase(best_bid.price_);
                 }
 
                 // Set status before freeing
@@ -545,18 +652,96 @@ namespace engine
             }
         }
 
+        // Update snapshot after matching (optimized with TopK heap references)
+        void update_snapshot_impl() noexcept
+        {
+            int write_idx = 1 - active_snapshot_.load(std::memory_order_relaxed);
+            MarketSnapshot& snap = snapshots_[write_idx];
+
+            // Best bid/ask directly from TopK heaps (O(1))
+            snap.best_bid = top_bid_heap_.empty() ? static_cast<Price>(-1) : top_bid_heap_.peek();
+            snap.best_ask = top_ask_heap_.empty() ? static_cast<Price>(-1) : top_ask_heap_.peek();
+            snap.market_price = last_trade_price_;
+            
+            // Order counts
+            snap.placed_count = placed_count_;
+            snap.cancelled_count = cancelled_count_;
+            snap.filled_count = filled_count_;
+            snap.open_count = order_pool_.active_count();
+
+            // Build top K bid levels from top-K heap (O(K) iteration + O(1) cache lookups)
+            snap.bid_levels = static_cast<std::uint8_t>(top_bid_heap_.size());
+            if (!top_bid_heap_.empty())
+            {
+                // Collect all prices and sort descending
+                Price prices[DEPTH_K];
+                int count = 0;
+                for (int i = 0; i < top_bid_heap_.size() && count < DEPTH_K; ++i)
+                {
+                    prices[count++] = top_bid_heap_.peek(i);
+                }
+                
+                // Sort descending by price (best bid first)
+                std::sort(prices, prices + count, std::greater<Price>());
+                // Fill snapshot with O(1) cache lookups
+                for (int i = 0; i < count; ++i)
+                {
+                    snap.bid_prices[i] = prices[i];
+                    auto it = bid_depth_cache_.find(prices[i]);
+                    snap.bid_depth[i] = (it != bid_depth_cache_.end()) ? it->second : 0;
+                }
+            }
+
+            // Build top K ask levels from top-K heap (O(K) iteration + O(1) cache lookups)
+            snap.ask_levels = static_cast<std::uint8_t>(top_ask_heap_.size());
+            if (!top_ask_heap_.empty())
+            {
+                // Collect all prices and sort ascending
+                Price prices[DEPTH_K];
+                int count = 0;
+                for (int i = 0; i < top_ask_heap_.size() && count < DEPTH_K; ++i)
+                {
+                    prices[count++] = top_ask_heap_.peek(i);
+                }
+                
+                // Sort ascending by price (best ask first)
+                std::sort(prices, prices + count);
+                // Fill snapshot with O(1) cache lookups
+                for (int i = 0; i < count; ++i)
+                {
+                    snap.ask_prices[i] = prices[i];
+                    auto it = ask_depth_cache_.find(prices[i]);
+                    snap.ask_depth[i] = (it != ask_depth_cache_.end()) ? it->second : 0;
+                }
+            }
+
+            active_snapshot_.store(write_idx, std::memory_order_release);
+        } 
+        
+         // OrderBook System
         OrderMemoryPool order_pool_; // Memory Pool for Orders with generational handles
         AskBook ask_book_;      // Asks Order Book
         BidBook bid_book_;      // Bids Order Book
         LevelMap ask_levels_;   // Asks Price Levels
         LevelMap bid_levels_;   // Bids Price Levels
+        TopBidHeap top_bid_heap_; // Top K bid prices (eagerly maintained)
+        TopAskHeap top_ask_heap_; // Top K ask prices (eagerly maintained)
         OrderId recent_order_id_; // Most recently placed order (generational handle)
         std::size_t placed_count_;    // Total orders successfully placed
         std::size_t cancelled_count_; // Total orders cancelled
         std::size_t filled_count_;    // Total orders filled
         bool verbose_;            // Verbose Mode Flag
         bool auto_match_;       // Auto Matching Flag
-        std::string ticker_;    // Ticker
         Price last_trade_price_; // Last trade execution price
+
+        // Depth cache for O(1) quantity lookups on top-K levels
+        std::unordered_map<Price, Quantity> bid_depth_cache_;
+        std::unordered_map<Price, Quantity> ask_depth_cache_;
+        // Double-buffered snapshots for lock-free reads
+        MarketSnapshot snapshots_[2];
+        std::atomic<int> active_snapshot_;
+        // Snapshot configuration
+        std::size_t snapshot_update_interval_; // 0 = manual only, N = update every N operations
+        std::size_t operations_since_snapshot_; // Counter for interval-based updates
     };
 }
