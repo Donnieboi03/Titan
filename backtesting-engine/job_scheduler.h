@@ -48,9 +48,24 @@ namespace scheduler
 
         // Process jobs for a specific worker
         void process_jobs_on(WorkerId worker_id);
+        
+        // Process all pending jobs (NO BLOCKING)
+        bool process_jobs_async();
+
+        // Process jobs for a specific worker (NO BLOCKING)
+        bool process_jobs_on_async();
 
         // Check if all jobs are complete
         bool is_complete() const;
+
+        // Check if specific worker is complete
+        bool is_complete_on(WorkerId worker_id) const;
+
+        // Get number of pending jobs across all workers
+        std::size_t pending_jobs() const noexcept;
+
+        // Get number of pending jobs for a specific worker
+        std::size_t pending_jobs_on(WorkerId worker_id) const noexcept;
 
         // Get number of workers
         std::size_t get_num_workers() const;
