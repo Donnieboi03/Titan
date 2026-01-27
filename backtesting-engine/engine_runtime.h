@@ -57,7 +57,7 @@ namespace runtime
         EngineRuntime& operator=(const EngineRuntime&) = delete;
         
         // Singleton instance accessor
-        static EngineRuntime& get_instance(std::size_t num_threads = 1, std::size_t default_capacity = 1048576, bool verbose = false);
+        static EngineRuntime& get_instance(std::size_t num_threads = 1, std::size_t default_capacity = 1048576, bool verbose = false, std::size_t quantum_orders = 64);
         
         // Reset instance to allow reinitialization
         static void reset_instance();
@@ -103,15 +103,12 @@ namespace runtime
         
         // Strategy registration and quantum execution
         User* register_strategy(User::Strategy strategy, double starting_capital = 100000.0);
-        void start_quantum_execution(std::size_t quantum_orders = 64);
-        void stop_quantum_execution();
-        bool is_quantum_enabled() const noexcept;
-        void set_quantum(std::size_t quantum_orders);
+        // Quantum control (configured at startup)
         std::size_t get_quantum() const noexcept;
 
     private:
         // Private constructor for singleton
-        EngineRuntime(std::size_t num_threads, std::size_t default_capacity, bool verbose);
+        EngineRuntime(std::size_t num_threads, std::size_t default_capacity, bool verbose, std::size_t quantum_orders);
         ~EngineRuntime();
         
         // Internal implementation

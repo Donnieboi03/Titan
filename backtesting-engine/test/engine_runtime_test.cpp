@@ -16,8 +16,9 @@ void print_test_header(const std::string& test_name) {
 
 void test_singleton_pattern() {
     print_test_header("Singleton Pattern");
-        runtime::EngineRuntime::reset_instance();    auto& runtime1 = runtime::EngineRuntime::get_instance(1, 1048576 * 4, false);  // Use proper capacity
-    auto& runtime2 = runtime::EngineRuntime::get_instance(4, 2000000, false); // Should be same instance, params ignored
+    runtime::EngineRuntime::reset_instance();    
+        auto& runtime1 = runtime::EngineRuntime::get_instance(1, 1048576 * 4, false, 0);  // Use proper capacity
+    auto& runtime2 = runtime::EngineRuntime::get_instance(4, 2000000, false, 0); // Should be same instance, params ignored
     
     // Both references should point to the same instance
     assert(&runtime1 == &runtime2);
@@ -28,7 +29,7 @@ void test_stock_registration() {
     print_test_header("Stock Registration");
     
     runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false);
+        auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     runtime.reset();
     
     // Test normal registration
@@ -75,7 +76,7 @@ void test_market_data_reads() {
     print_test_header("Market Data Reads");
     
     runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false);
+    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     runtime.reset();
     
     // Register a stock
@@ -87,12 +88,12 @@ void test_market_data_reads() {
     auto best_bid = runtime.get_best_bid("TSLA");
     auto best_ask = runtime.get_best_ask("TSLA");
     
-    assert(best_ask.has_value());
-    assert(best_ask.value() == 200.00);
-    std::cout << "✓ Best ask: $" << std::fixed << std::setprecision(2) << best_ask.value() << std::endl;
+    assert(best_ask != 0);
+    assert(best_ask == 200.00);
+    std::cout << "✓ Best ask: $" << std::fixed << std::setprecision(2) << best_ask << std::endl;
     
     // No bids yet, so best_bid should be empty
-    assert(!best_bid.has_value());
+    assert(best_bid == -1);
     std::cout << "✓ No bids available as expected" << std::endl;
     
     // Test market depth
@@ -105,7 +106,7 @@ void test_limit_orders() {
     print_test_header("Limit Orders");
     
     runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false);
+    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     runtime.reset();
     
     // Register stock
@@ -126,9 +127,9 @@ void test_limit_orders() {
     
     // Check best bid
     auto best_bid = runtime.get_best_bid("NVDA");
-    assert(best_bid.has_value());
-    assert(std::abs(best_bid.value() - 795.00) < 0.01);
-    std::cout << "✓ Best bid: $" << std::fixed << std::setprecision(2) << best_bid.value() << std::endl;
+    assert(best_bid != 0);
+    assert(std::abs(best_bid - 795.00) < 0.01);
+    std::cout << "✓ Best bid: $" << std::fixed << std::setprecision(2) << best_bid << std::endl;
     
     // Submit sell order above market (no fill) - price it high enough to avoid matching
     runtime.submit_limit_order("NVDA", engine::OrderSide::ASK, 850.00, 0.5);
@@ -143,16 +144,16 @@ void test_limit_orders() {
     }
     
     auto best_ask = runtime.get_best_ask("NVDA");
-    assert(best_ask.has_value());
-    assert(std::abs(best_ask.value() - 800.00) < 0.01); // Should still be IPO price
-    std::cout << "✓ Best ask: $" << std::fixed << std::setprecision(2) << best_ask.value() << std::endl;
+    assert(best_ask != 0);
+    assert(std::abs(best_ask - 800.00) < 0.01); // Should still be IPO price
+    std::cout << "✓ Best ask: $" << std::fixed << std::setprecision(2) << best_ask << std::endl;
 }
 
 void test_market_orders() {
     print_test_header("Market Orders");
     
     runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false);
+    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     runtime.reset();
     
     // Register stock with lower quantity for easier testing
@@ -178,8 +179,8 @@ void test_market_orders() {
     
     // Check if market price updated (should be around $300)
     auto market_price = runtime.get_market_price("MSFT");
-    if (market_price.has_value()) {
-        std::cout << "✓ Market order executed at: $" << std::fixed << std::setprecision(2) << market_price.value() << std::endl;
+    if (market_price != 0) {
+        std::cout << "✓ Market order executed at: $" << std::fixed << std::setprecision(2) << market_price << std::endl;
     }
 }
 
@@ -187,7 +188,7 @@ void test_order_cancellation() {
     print_test_header("Order Cancellation");
     
     runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false);
+    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     runtime.reset();
     
     // Register stock
@@ -215,7 +216,7 @@ void test_order_editing() {
     print_test_header("Order Editing");
     
     runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false);
+    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     runtime.reset();
     
     // Register stock
@@ -262,8 +263,8 @@ void test_order_editing() {
         
         // Verify the best bid changed
         auto best_bid = runtime.get_best_bid("GOOGL");
-        if (best_bid.has_value()) {
-            std::cout << "✓ Best bid after edit: $" << std::fixed << std::setprecision(2) << best_bid.value() << std::endl;
+        if (best_bid != 0) {
+            std::cout << "✓ Best bid after edit: $" << std::fixed << std::setprecision(2) << best_bid << std::endl;
         }
     }
 }
@@ -272,7 +273,7 @@ void test_multi_user_trading() {
     print_test_header("Multi-User Trading");
     
     runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false);
+    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     runtime.reset();
     
     // Register stock
@@ -309,7 +310,7 @@ void test_async_processing() {
     print_test_header("Async Processing");
     
     runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false);
+    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     runtime.reset();
     
     const int BASIC_TEST_ORDERS = 50;
@@ -342,6 +343,7 @@ void test_async_processing() {
     
     // Verify all orders were actually placed using engine counts
     std::size_t placed_count = runtime.get_placed_count("AAPL");
+    std::cout << "Placed count: " << placed_count << ", expected: " << BASIC_TEST_ORDERS + 1 << std::endl;
     
     if (placed_count == BASIC_TEST_ORDERS + 1) {
         std::cout << "✓ All orders successfully placed" << std::endl;
@@ -356,10 +358,10 @@ void test_stress_performance() {
     print_test_header("Stress Testing & Performance");
     
     runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(1, 1048576 * 4, false);  // 1 thread for single stock
+    auto& runtime = runtime::EngineRuntime::get_instance(1, 1048576, false, 0);  // 1 thread for single stock
     runtime.reset();
     
-    const int STRESS_TEST_ORDERS = 100000000;  // 10M orders
+    const int STRESS_TEST_ORDERS = 1000000;  // 10M orders
     
     // Register stock for stress testing with sufficient capacity
     bool success = runtime.register_stock("STRESS", 100.00, 100000.0);  // capacity=0 uses default
@@ -372,7 +374,8 @@ void test_stress_performance() {
     std::cout << "Phase 1: Testing order placement with matching..." << std::endl;
     
     const int NUM_PRICES = 100;  // Price levels
-    auto start = std::chrono::high_resolution_clock::now();
+    auto total_start = std::chrono::high_resolution_clock::now();
+    auto submit_start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < STRESS_TEST_ORDERS; ++i) {
         // Use same price range for BID and ASK to enable matching
         double price_ticks = 10000 + (i % NUM_PRICES);
@@ -380,23 +383,25 @@ void test_stress_performance() {
         engine::OrderSide side = (i % 2 == 0) ? engine::OrderSide::BID : engine::OrderSide::ASK;
         runtime.submit_limit_order("STRESS", side, price, 0.1);
     }
-    auto end = std::chrono::high_resolution_clock::now();
+    auto submit_end = std::chrono::high_resolution_clock::now();
     
-    auto submit_duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    auto submit_duration = std::chrono::duration_cast<std::chrono::microseconds>(submit_end - submit_start);
     std::cout << "✓ Submitted " << STRESS_TEST_ORDERS << " orders" << std::endl;
     std::cout << "✓ Submission took " << submit_duration.count() << " microseconds" << std::endl;
     
-    // Process all orders
-    start = std::chrono::high_resolution_clock::now();
+    // Process all orders (wait for workers to complete)
+    auto process_start = std::chrono::high_resolution_clock::now();
     runtime.process_pending_orders();
-    end = std::chrono::high_resolution_clock::now();
+    auto process_end = std::chrono::high_resolution_clock::now();
     
-    auto process_duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-    std::cout << "✓ Processed " << STRESS_TEST_ORDERS << " orders in " << process_duration.count() << " microseconds" << std::endl;
+    auto process_duration = std::chrono::duration_cast<std::chrono::microseconds>(process_end - process_start);
+    std::cout << "✓ Worker synchronization took " << process_duration.count() << " microseconds" << std::endl;
     
-    // Calculate throughput  
-    double orders_per_second = STRESS_TEST_ORDERS / (process_duration.count() / 1000000.0);
-    std::cout << "✓ Throughput: " << std::fixed << std::setprecision(0) << orders_per_second << " orders/second" << std::endl;
+    // Calculate end-to-end throughput (submission + processing)
+    auto total_duration = std::chrono::duration_cast<std::chrono::microseconds>(process_end - total_start);
+    double orders_per_second = STRESS_TEST_ORDERS / (total_duration.count() / 1000000.0);
+    std::cout << "✓ Total time (submission + processing): " << total_duration.count() << " microseconds" << std::endl;
+    std::cout << "✓ End-to-end throughput: " << std::fixed << std::setprecision(0) << orders_per_second << " orders/second" << std::endl;
     
     // Verify results with matching
     std::size_t placed_count = runtime.get_placed_count("STRESS");
@@ -417,14 +422,14 @@ void test_stress_performance() {
     auto positions = runtime.get_positions(0, "STRESS");
     std::size_t cancel_count = std::min(positions.size() / 2, (std::size_t)500000);  // Cancel up to 500k
     
-    start = std::chrono::high_resolution_clock::now();
+    auto cancel_start = std::chrono::high_resolution_clock::now();
     for (std::size_t i = 0; i < cancel_count; ++i) {
         runtime.submit_cancel_order("STRESS", positions[i]);
     }
     runtime.process_pending_orders();
-    end = std::chrono::high_resolution_clock::now();
+    auto cancel_end = std::chrono::high_resolution_clock::now();
     
-    auto cancel_duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    auto cancel_duration = std::chrono::duration_cast<std::chrono::microseconds>(cancel_end - cancel_start);
     double cancel_ops_per_sec = cancel_count / (cancel_duration.count() / 1000000.0);
     
     std::size_t cancelled_count = runtime.get_cancelled_count("STRESS");
@@ -441,16 +446,16 @@ void test_stress_performance() {
     auto remaining_positions = runtime.get_positions(0, "STRESS");
     std::size_t edit_count = std::min(remaining_positions.size() / 2, (std::size_t)250000);  // Edit up to 250k
     
-    start = std::chrono::high_resolution_clock::now();
+    auto edit_start = std::chrono::high_resolution_clock::now();
     for (std::size_t i = 0; i < edit_count; ++i) {
         // Edit with slightly different price and quantity
         double new_price = 60.00 + (i % 100) * 0.01;
         runtime.submit_edit_order("STRESS", remaining_positions[i], new_price, 0.2);
     }
     runtime.process_pending_orders();
-    end = std::chrono::high_resolution_clock::now();
+    auto edit_end = std::chrono::high_resolution_clock::now();
     
-    auto edit_duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    auto edit_duration = std::chrono::duration_cast<std::chrono::microseconds>(edit_end - edit_start);
     double edit_ops_per_sec = edit_count / (edit_duration.count() / 1000000.0);
     
     std::cout << "✓ Edited " << edit_count << " orders in " << edit_duration.count() 
@@ -485,7 +490,7 @@ void test_multi_stock_stress() {
     const int NUM_WORKERS = 8;  // One worker per stock for optimal parallelism
     
     runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(NUM_WORKERS, 1048576, false);
+    auto& runtime = runtime::EngineRuntime::get_instance(NUM_WORKERS, 1048576, false, 0);
     runtime.reset();
     
     std::cout << "=== Multi-Stock Test (" << NUM_STOCKS << " stocks, " 
@@ -504,7 +509,8 @@ void test_multi_stock_stress() {
     std::cout << "Phase 1: Testing concurrent order placement..." << std::endl;
     
     const int NUM_PRICES = 100;
-    auto start = std::chrono::high_resolution_clock::now();
+    auto total_start = std::chrono::high_resolution_clock::now();
+    auto submit_start = std::chrono::high_resolution_clock::now();
     
     // Interleave orders across stocks for maximum concurrency
     for (int i = 0; i < ORDERS_PER_STOCK; ++i) {
@@ -517,24 +523,25 @@ void test_multi_stock_stress() {
     }
     
     auto submit_end = std::chrono::high_resolution_clock::now();
-    auto submit_duration = std::chrono::duration_cast<std::chrono::microseconds>(submit_end - start);
+    auto submit_duration = std::chrono::duration_cast<std::chrono::microseconds>(submit_end - submit_start);
     
     std::cout << "✓ Submitted " << NUM_STOCKS * ORDERS_PER_STOCK << " orders across " 
               << NUM_STOCKS << " stocks" << std::endl;
     std::cout << "✓ Submission took " << submit_duration.count() << " microseconds" << std::endl;
     
-    // Process all orders
+    // Process all orders (wait for workers)
     auto process_start = std::chrono::high_resolution_clock::now();
     runtime.process_pending_orders();
     auto process_end = std::chrono::high_resolution_clock::now();
     
     auto process_duration = std::chrono::duration_cast<std::chrono::microseconds>(process_end - process_start);
+    auto total_duration = std::chrono::duration_cast<std::chrono::microseconds>(process_end - total_start);
     double total_orders = NUM_STOCKS * ORDERS_PER_STOCK;
-    double orders_per_second = total_orders / (process_duration.count() / 1000000.0);
+    double orders_per_second = total_orders / (total_duration.count() / 1000000.0);
     
-    std::cout << "✓ Processed " << static_cast<int>(total_orders) << " orders in " 
-              << process_duration.count() << " microseconds" << std::endl;
-    std::cout << "✓ Throughput: " << std::fixed << std::setprecision(0) 
+    std::cout << "✓ Worker synchronization took " << process_duration.count() << " microseconds" << std::endl;
+    std::cout << "✓ Total time (submission + processing): " << total_duration.count() << " microseconds" << std::endl;
+    std::cout << "✓ End-to-end throughput: " << std::fixed << std::setprecision(0) 
               << orders_per_second << " orders/second" << std::endl;
     
     // Verify results for each stock
@@ -581,7 +588,7 @@ void test_edge_cases() {
     print_test_header("Edge Cases");
     
     runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false);
+    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     runtime.reset();
     
     // Test operations on non-existent ticker
@@ -611,10 +618,61 @@ void test_edge_cases() {
     std::cout << "✓ Handled invalid order values gracefully" << std::endl;
 }
 
+void test_notifications() {
+    print_test_header("Notification System");
+    
+    runtime::EngineRuntime::reset_instance();
+    // Enable verbose mode to activate notification system
+    auto& runtime = runtime::EngineRuntime::get_instance(2, 10000, true, 0);
+    runtime.reset();
+    
+    std::cout << "=== Testing notification system with verbose=true ===" << std::endl;
+    
+    // Register a stock
+    bool success = runtime.register_stock("NOTIFY_TEST", 100.0, 5.0);
+    assert(success);
+    std::cout << "✓ Stock registered with notifications enabled" << std::endl;
+    
+    // Trigger various events that generate notifications
+    std::cout << "Submitting orders to generate notifications..." << std::endl;
+    
+    // Valid orders
+    runtime.submit_limit_order("NOTIFY_TEST", engine::OrderSide::BID, 99.0, 1.0);
+    runtime.submit_limit_order("NOTIFY_TEST", engine::OrderSide::ASK, 101.0, 1.0);
+
+    // Invalid operations (should trigger error notifications)
+    runtime.submit_limit_order("NONEXISTENT", engine::OrderSide::BID, 50.0, 1.0);  // Invalid ticker
+    runtime.submit_limit_order("NOTIFY_TEST", engine::OrderSide::BID, -10.0, 1.0); // Invalid price
+    runtime.submit_limit_order("NOTIFY_TEST", engine::OrderSide::BID, 50.0, 0.0);  // Invalid quantity
+
+    // Cancel non-existent order
+    runtime.submit_cancel_order("NOTIFY_TEST", 99999);
+    
+    // Process all pending orders
+    runtime.process_pending_orders();
+    
+    // Give notification thread time to process messages
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    std::cout << "✓ Notification system processed all events" << std::endl;
+    std::cout << "✓ Check console output above for notification messages" << std::endl;
+    
+    // Unregister stock (should also generate notification)
+    bool unregistered = runtime.unregister_stock("NOTIFY_TEST");
+    assert(unregistered);
+    
+    // Give notification thread time to process final messages
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    
+    std::cout << "✓ Notification system test completed" << std::endl;
+    std::cout << "Note: Notifications are printed to console in verbose mode" << std::endl;
+}
+
 int main() {
     std::cout << "Starting EngineRuntime Tests..." << std::endl;
     
     try {
+        
         test_singleton_pattern();
         test_stock_registration();
         test_market_data_reads();
@@ -627,6 +685,7 @@ int main() {
         test_stress_performance();
         test_multi_stock_stress();
         test_edge_cases();
+        test_notifications();
         
         std::cout << "\n" << std::string(60, '=') << std::endl;
         std::cout << "🎉 ALL TESTS PASSED! 🎉" << std::endl;

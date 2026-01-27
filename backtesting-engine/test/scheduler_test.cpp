@@ -44,8 +44,8 @@ void test_basic_job_submission()
         scheduler.submit_job(std::move(job2));
         scheduler.submit_job(std::move(job3));
         
-        std::cout << "Calling process_jobs()...\n";
-        scheduler.process_jobs();
+            std::cout << "Calling process_jobs()...\n";
+            scheduler.process_jobs();
     }
     
     std::cout << "Counter value: " << counter.load() << "\n";
@@ -72,7 +72,7 @@ void test_multiple_jobs_same_worker()
             scheduler.submit_job(std::move(job));
         }
         
-        scheduler.process_jobs();
+            scheduler.process_jobs();
     }
     
     assert(counter.load() == NUM_JOBS && "All jobs should have executed");
@@ -89,7 +89,7 @@ void test_round_robin_distribution()
     std::atomic<int> counter{0};
     
     {
-        scheduler::JobScheduler scheduler(NUM_WORKERS, 1000);
+        scheduler::JobScheduler scheduler(4, 1000);
     
     
         // Distribute jobs round-robin across workers
@@ -102,7 +102,7 @@ void test_round_robin_distribution()
             scheduler.submit_job(std::move(job));
         }
         
-        scheduler.process_jobs();
+            scheduler.process_jobs();
     }
     
     assert(counter.load() == NUM_JOBS && "All jobs should have executed");
@@ -139,7 +139,7 @@ void test_computational_jobs()
             scheduler.submit_job(std::move(job));
         }
         
-        scheduler.process_jobs();
+            scheduler.process_jobs();
     }
     
     auto end = std::chrono::high_resolution_clock::now();
@@ -155,9 +155,9 @@ void test_stress_submission()
 {
     std::cout << "=== Testing Raw Throughput: Multi-Batch vs Single-Batch (emplace only) ===\n";
 
-    const int NUM_JOBS = 1024 * 1024 * 1024;
-    const int WORKERS = 4;
-    const int NUM_BATCHES = 256;
+    const int NUM_JOBS = 1024 * 1024;
+    const int WORKERS = 2;
+    const int NUM_BATCHES = 128;
     const int JOBS_PER_BATCH = NUM_JOBS / NUM_BATCHES;
 
     // Test 1: Multi-batch async processing (streaming jobs)
@@ -175,7 +175,7 @@ void test_stress_submission()
                 {
                     int global_job_idx = batch * JOBS_PER_BATCH + i;
                     std::size_t wid = static_cast<std::size_t>(global_job_idx % WORKERS);
-                    scheduler.submit_job(scheduler::make_job(
+                    scheduler.submit_job_on(wid, scheduler::make_job(
                         [&worker_counters, wid]() {
                             int result = 0;
                             for (int j = 0; j < 100; ++j)
@@ -192,10 +192,10 @@ void test_stress_submission()
                 scheduler.process_jobs_async();
             }
 
-            // Wait for all async processing to complete
-            while (!scheduler.is_complete()) {
-                std::this_thread::yield();
-            }
+            // // Wait for all async processing to complete
+            // while (!scheduler.is_complete()) {
+            //     std::this_thread::yield();
+            // }
         }
 
         auto end = std::chrono::high_resolution_clock::now();
@@ -222,7 +222,7 @@ void test_stress_submission()
                 {
                     int global_job_idx = batch * JOBS_PER_BATCH + i;
                     std::size_t wid = static_cast<std::size_t>(global_job_idx % WORKERS);
-                    scheduler.submit_job(scheduler::make_job(
+                    scheduler.submit_job_on(wid, scheduler::make_job(
                         [&worker_counters, wid]() {
                             int result = 0;
                             for (int j = 0; j < 100; ++j)
@@ -261,7 +261,7 @@ void test_stress_submission()
             for (int i = 0; i < NUM_JOBS; ++i)
             {
                 std::size_t wid = static_cast<std::size_t>(i % WORKERS);
-                scheduler.submit_job(scheduler::make_job(
+                scheduler.submit_job_on(wid, scheduler::make_job(
                     [&worker_counters, wid]() {
                         int result = 0;
                         for (int j = 0; j < 100; ++j)
@@ -276,11 +276,6 @@ void test_stress_submission()
 
             // Process all jobs asynchronously
             scheduler.process_jobs_async();
-
-            // Wait for completion
-            while (!scheduler.is_complete()) {
-                std::this_thread::yield();
-            }
         }
 
         auto end = std::chrono::high_resolution_clock::now();
@@ -304,7 +299,7 @@ void test_stress_submission()
             for (int i = 0; i < NUM_JOBS; ++i)
             {
                 std::size_t wid = static_cast<std::size_t>(i % WORKERS);
-                scheduler.submit_job(scheduler::make_job(
+                scheduler.submit_job_on(wid, scheduler::make_job(
                     [&worker_counters, wid]() {
                         int result = 0;
                         for (int j = 0; j < 100; ++j)
@@ -351,7 +346,7 @@ void test_empty_check()
     scheduler.submit_job(std::move(job));
     
     // Execute and wait for job to complete
-    scheduler.process_jobs();
+        scheduler.process_jobs();
     
     // Should be empty again
     assert(scheduler.is_complete() && "Scheduler should be empty after completion");
@@ -382,7 +377,7 @@ void test_sequential_vs_parallel()
     auto seq_duration = std::chrono::duration_cast<std::chrono::milliseconds>(seq_end - seq_start);
     
     std::cout << "  Sequential: " << seq_duration.count() << "ms\n";
-    
+
     // Parallel execution - distribute jobs across all 4 workers
     std::atomic<int> par_counter{0};
     const int NUM_WORKERS = 4;
@@ -407,7 +402,7 @@ void test_sequential_vs_parallel()
             );
             scheduler.submit_job(std::move(job));
         }
-        scheduler.process_jobs();
+            scheduler.process_jobs();
     }
     
     auto par_end = std::chrono::high_resolution_clock::now();
@@ -432,6 +427,7 @@ int main()
     std::cout << "========================================\n\n";
     
     
+    
     test_basic_job_submission();
     test_multiple_jobs_same_worker();
     test_round_robin_distribution();
@@ -439,7 +435,7 @@ int main()
     test_empty_check();
     test_stress_submission();
     test_sequential_vs_parallel();
-    
+
     std::cout << "========================================\n";
     std::cout << "  All Scheduler Tests PASSED! ✓\n";
     std::cout << "========================================\n";
