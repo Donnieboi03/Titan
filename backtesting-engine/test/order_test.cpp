@@ -342,8 +342,8 @@ void test_stress_orders()
 {
     std::cout << "=== Stress Test: Order Operations ===\n";
     
-    const int NUM_ORDERS = 1000000;  // 10M orders
-    const std::size_t CAPACITY = (512 * 64);  // 500K capacity
+    const int NUM_ORDERS = 10000000;  // 10M orders
+    const std::size_t CAPACITY = (512 * 512);  // 500K capacity
     const int NUM_PRICES = 100;  // Price levels
     
     // ========== TEST 1a: PLACEMENT WITH MATCHING ==========
@@ -518,6 +518,49 @@ void test_slot_reuse()
     assert(!cancel_result && "Cancel with freed ID should fail");
     
     std::cout << "✓ Slot Reuse Test PASSED!\n\n";
+}
+
+void test_accumulate_drain_throughput()
+{
+    std::cout << "=== Testing Accumulate (auto_match=off) then Drain Throughput ===\n";
+
+    const std::size_t NUM_ORDERS = 10000000; // configurable for CI
+    const std::size_t CAPACITY = 1024 * 1024 * 16;
+
+    // Create engine with auto_match disabled so orders are queued
+    engine::OrderEngine engine(CAPACITY, false, false);
+
+    // Placement phase
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (std::size_t i = 0; i < NUM_ORDERS; ++i) {
+        engine::OrderSide side = (i % 2 == 0) ? engine::OrderSide::BID : engine::OrderSide::ASK;
+        engine::Price p = price(100.0 + static_cast<double>(i % 10));
+        engine.place_order(side, engine::OrderType::LIMIT, p, 1);
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    auto place_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+    engine.update_snapshot();
+    auto placed = engine.get_snapshot().placed_count;
+
+    double place_rate = place_ms > 0 ? (placed / (place_ms / 1000.0)) : 0.0;
+    std::cout << " Placement: " << placed << " orders in " << place_ms << " ms (" << place_rate << " ops/sec)\n";
+
+    // Drain phase: flip auto_match on and measure time to process queued orders
+    auto tdrain0 = std::chrono::high_resolution_clock::now();
+    engine.set_auto_match(true);
+    auto tdrain1 = std::chrono::high_resolution_clock::now();
+    auto drain_ms = std::chrono::duration_cast<std::chrono::milliseconds>(tdrain1 - tdrain0).count();
+
+    engine.update_snapshot();
+    auto filled = engine.get_snapshot().filled_count;
+    auto open = engine.get_snapshot().open_count;
+
+    double drain_rate = drain_ms > 0 ? (placed / (drain_ms / 1000.0)) : 0.0;
+    std::cout << " Drain: processed " << placed << " queued orders in " << drain_ms << " ms (" << drain_rate << " ops/sec)\n";
+    std::cout << " Result: filled=" << filled << ", open=" << open << "\n";
+
+    std::cout << "✓ Accumulate+Drain throughput test completed\n\n";
 }
 
 void test_memory_efficiency()
@@ -934,6 +977,7 @@ int main(int argc, char* argv[])
     test_order_priority();
     test_order_matching_correctness();
     test_slot_reuse();
+    test_accumulate_drain_throughput();
     test_memory_efficiency();
     test_capacity_limits();
     test_stress_orders();

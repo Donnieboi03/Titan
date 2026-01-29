@@ -1,4 +1,4 @@
-#include "../job_scheduler.cpp"
+#include "../../tools/job_scheduler.cpp"
 #include <iostream>
 #include <cassert>
 #include <vector>
@@ -44,8 +44,8 @@ void test_basic_job_submission()
         scheduler.submit_job(std::move(job2));
         scheduler.submit_job(std::move(job3));
         
-            std::cout << "Calling process_jobs()...\n";
-            scheduler.process_jobs();
+        std::cout << "Calling process_jobs()...\n";
+        scheduler.process_jobs();
     }
     
     std::cout << "Counter value: " << counter.load() << "\n";
@@ -72,7 +72,7 @@ void test_multiple_jobs_same_worker()
             scheduler.submit_job(std::move(job));
         }
         
-            scheduler.process_jobs();
+        scheduler.process_jobs();
     }
     
     assert(counter.load() == NUM_JOBS && "All jobs should have executed");
@@ -89,7 +89,7 @@ void test_round_robin_distribution()
     std::atomic<int> counter{0};
     
     {
-        scheduler::JobScheduler scheduler(4, 1000);
+        scheduler::JobScheduler scheduler(NUM_WORKERS, 1000);
     
     
         // Distribute jobs round-robin across workers
@@ -102,7 +102,7 @@ void test_round_robin_distribution()
             scheduler.submit_job(std::move(job));
         }
         
-            scheduler.process_jobs();
+        scheduler.process_jobs();
     }
     
     assert(counter.load() == NUM_JOBS && "All jobs should have executed");
@@ -139,7 +139,7 @@ void test_computational_jobs()
             scheduler.submit_job(std::move(job));
         }
         
-            scheduler.process_jobs();
+        scheduler.process_jobs();
     }
     
     auto end = std::chrono::high_resolution_clock::now();
@@ -346,7 +346,7 @@ void test_empty_check()
     scheduler.submit_job(std::move(job));
     
     // Execute and wait for job to complete
-        scheduler.process_jobs();
+    scheduler.process_jobs();
     
     // Should be empty again
     assert(scheduler.is_complete() && "Scheduler should be empty after completion");
@@ -402,7 +402,7 @@ void test_sequential_vs_parallel()
             );
             scheduler.submit_job(std::move(job));
         }
-            scheduler.process_jobs();
+        scheduler.process_jobs();
     }
     
     auto par_end = std::chrono::high_resolution_clock::now();
