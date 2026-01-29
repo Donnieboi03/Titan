@@ -33,128 +33,118 @@ namespace engine
     // Order Sides
     enum class OrderSide : std::uint8_t
     {
-        BID, 
+        BID,
         ASK
     };
 
-    // Price and quantity in ticks
-    using Price = std::uint64_t;   
+    // price and qty in ticks
+    using Price = std::uint64_t;
     using Quantity = std::uint32_t;
-    using OrderId = std::uint32_t;
 
-    constexpr OrderId INVALID_ID = static_cast<OrderId>(-1);
-
-    // Order information structure
+    // Order information (public view)
     struct OrderInfo
     {
         Timestamp time_;
         Price price_;
         Quantity qty_;
-        OrderId id_;
-        OrderSide side_;
-        OrderType type_;
         OrderStatus status_;
+        OrderType type_;
+        OrderSide side_;
+        bool in_book_ = true; // whether currently pushed into the orderbook
 
         OrderInfo() = default;
-        OrderInfo(Timestamp t, Price p, Quantity q, OrderId id, OrderSide s, OrderType type)
-            : time_(t), price_(p), qty_(q), id_(id), side_(s), type_(type), status_(OrderStatus::OPEN) {}
     };
 
-    // Event kinds for engine messages
-    enum class EventKind : std::uint8_t
+    // Engine event kinds
+    enum class EventKind : uint8_t
     {
         NONE,
         ACCEPT,
         REJECT,
+        MODIFY,
+        PARTIAL_FILL,
         FILL,
-        CANCEL,
-        EDIT
+        CANCEL
     };
 
-    // Engine message structure
+    enum class RejectReason : uint8_t
+    {
+        NO_MARKET_LIQUIDITY,
+        ENGINE_FULL,
+        ORDER_NOT_FOUND
+    };
+
     struct EngineMsg
     {
-        EventKind kind;
-        OrderId order_id;
-        Price price;
-        Quantity qty;
-        Timestamp time;
+        EventKind kind = EventKind::NONE;
+        // payload
+        // Note: external id encoding uses engine prefix; callers work with engine::OrderId
+        using OrderId = std::uint64_t;
+        OrderId order_id = static_cast<OrderId>(-1);
+        Price price = static_cast<Price>(-1);
+        Quantity qty = 0;
+        OrderSide side = OrderSide::BID;
+        RejectReason reject = RejectReason::NO_MARKET_LIQUIDITY;
 
-        EngineMsg() : kind(EventKind::NONE), order_id(INVALID_ID), price(0), qty(0), time(0) {}
-        EngineMsg(EventKind k, OrderId id, Price p, Quantity q, Timestamp t)
-            : kind(k), order_id(id), price(p), qty(q), time(t) {}
+        EngineMsg() = default;
+        EngineMsg(EventKind k, OrderId oid) : kind(k), order_id(oid) {}
+        EngineMsg(EventKind k, RejectReason rr) : kind(k), reject(rr) {}
+        EngineMsg(EventKind k, OrderId oid, Price p, Quantity q, OrderSide s) : kind(k), order_id(oid), price(p), qty(q), side(s) {}
     };
 
-    // Market snapshot structure
+    // Snapshot structure (lock-free double-buffered in implementation)
     struct MarketSnapshot
     {
-        Price market_price;
         Price best_bid;
         Price best_ask;
+        Price market_price;
+        bool auto_match;
+        Quantity bid_depth[10];
+        Quantity ask_depth[10];
+        Price bid_prices[10];
+        Price ask_prices[10];
+        std::uint8_t bid_levels;
+        std::uint8_t ask_levels;
         std::size_t placed_count;
         std::size_t cancelled_count;
         std::size_t filled_count;
         std::size_t open_count;
 
-        MarketSnapshot()
-            : market_price(static_cast<Price>(-1)),
-              best_bid(static_cast<Price>(-1)),
-              best_ask(static_cast<Price>(-1)),
-              placed_count(0),
-              cancelled_count(0),
-              filled_count(0),
-              open_count(0) {}
+        MarketSnapshot() noexcept;
     };
 
-    // OrderEngine class declaration
+    // OrderEngine interface (implementation lives in order_engine.cpp)
     class OrderEngine
     {
     public:
-        OrderEngine(std::size_t capacity, bool verbose = false, bool auto_match = false);
+        OrderEngine(std::size_t capacity = 1048576, bool verbose = true, bool auto_match = true, std::uint16_t engine_id = 0) noexcept;
         ~OrderEngine();
 
-        // Order operations
-        OrderId place_order(OrderSide side, OrderType type, Price price, Quantity qty, std::vector<EngineMsg>& msgs);
-        OrderId place_order(OrderSide side, OrderType type, Price price, Quantity qty);
-        bool cancel_order(OrderId order_id, std::vector<EngineMsg>& msgs);
-        bool cancel_order(OrderId order_id);
-        OrderId edit_order(OrderId order_id, Price new_price, Quantity new_qty, std::vector<EngineMsg>& msgs);
-        OrderId edit_order(OrderId order_id, Price new_price, Quantity new_qty);
+        using OrderId = std::uint64_t; // external id (engine-prefixed)
 
-        // Matching
-        void match_orders(std::vector<EngineMsg>& msgs);
-        void match_orders();
+        // Place / edit / cancel
+        OrderId place_order(OrderSide side, OrderType type, Price price, Quantity qty, std::vector<EngineMsg>& msgs) noexcept;
+        OrderId place_order(OrderSide side, OrderType type, Price price, Quantity qty) noexcept;
+        bool cancel_order(OrderId id, EngineMsg& msg) noexcept;
+        bool cancel_order(OrderId id) noexcept;
+        OrderId edit_order(OrderId id, OrderSide side, Price price, Quantity qty, std::vector<EngineMsg>& msgs) noexcept;
+        OrderId edit_order(OrderId id, OrderSide side, Price price, Quantity qty) noexcept;
 
-        // Queries
-        const OrderInfo* get_order(OrderId order_id) const;
-        std::vector<std::pair<Price, Quantity>> get_market_depth(OrderSide side, std::size_t depth) const;
-        
-        // Snapshot
-        void update_snapshot();
-        const MarketSnapshot& get_snapshot() const { return snapshot_; }
+        // Auto-match control
+        void set_auto_match(bool auto_match) noexcept;
+        bool get_auto_match() const noexcept;
 
-        // Configuration
-        void set_auto_match(bool auto_match) { auto_match_ = auto_match; }
-        bool get_auto_match() const { return auto_match_; }
+        // Snapshot access
+        void update_snapshot() noexcept;
+        const MarketSnapshot& get_snapshot() const noexcept;
 
-        // Statistics
-        std::size_t get_placed_count() const { return placed_count_; }
-        std::size_t get_cancelled_count() const { return cancelled_count_; }
-        std::size_t get_filled_count() const { return filled_count_; }
-        std::size_t get_open_count() const;
+        // Order lookup (returns nullptr if invalid/freed)
+        const OrderInfo* get_order(OrderId id) const noexcept;
 
     private:
-        class Impl;
-        Impl* pimpl_;
-        
-        std::string ticker_;
-        bool verbose_;
-        bool auto_match_;
-        
-        MarketSnapshot snapshot_;
-        std::size_t placed_count_;
-        std::size_t cancelled_count_;
-        std::size_t filled_count_;
+        // Implementation-defined members are private in .cpp
+        struct Impl;
+        Impl* impl_ = nullptr;
     };
 }
 

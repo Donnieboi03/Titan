@@ -2,19 +2,19 @@
 #include <vector>
 
 template <typename T>
-struct RingBuffer 
+struct LazyQueue 
 {
 private:
     static constexpr std::size_t DEFAULT_RESERVED_SIZE = 32768; // 32K default
 
 public:
-    RingBuffer() noexcept
+    LazyQueue() noexcept
     : head_(0)
     {
         q_.reserve(DEFAULT_RESERVED_SIZE); 
     }
     
-    explicit RingBuffer(std::size_t reserve_size) noexcept
+    explicit LazyQueue(std::size_t reserve_size) noexcept
     : head_(0)
     {
         q_.reserve(reserve_size);
@@ -27,6 +27,15 @@ public:
 
     void push(T&& value) noexcept { q_.push_back(std::forward<T>(value)); }
     void push(const T& value) noexcept { q_.push_back(value); }
+
+    template <typename... Args>
+    T& emplace(Args&&... args) noexcept
+    {
+        q_.emplace_back(std::forward<Args>(args)...);
+        return q_.back();
+    }
+
+    void emplace(T&& value) noexcept { q_.emplace(std::forward<T>(value)); }
 
     void pop() noexcept
     {

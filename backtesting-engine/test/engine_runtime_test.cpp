@@ -358,13 +358,13 @@ void test_stress_performance() {
     print_test_header("Stress Testing & Performance");
     
     runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(1, 1048576, false, 0);  // 1 thread for single stock
+    auto& runtime = runtime::EngineRuntime::get_instance(1, 1048576 * 2, false, 0);  // 1 thread for single stock
     runtime.reset();
     
     const int STRESS_TEST_ORDERS = 1000000;  // 10M orders
     
     // Register stock for stress testing with sufficient capacity
-    bool success = runtime.register_stock("STRESS", 100.00, 100000.0);  // capacity=0 uses default
+    bool success = runtime.register_stock("STRESS", 100.00, 10000.0);  // capacity=0 uses default
     assert(success);
     
     std::cout << "=== Stress Test (" << STRESS_TEST_ORDERS << " orders) ===" << std::endl;
@@ -584,6 +584,59 @@ void test_multi_stock_stress() {
     std::cout << "✓ Multi-stock stress test completed successfully" << std::endl;
 }
 
+void test_accumulate_drain_runtime()
+{
+    print_test_header("Accumulate (auto_match=off) then Drain via EngineRuntime");
+
+    runtime::EngineRuntime::reset_instance();
+    auto& runtime = runtime::EngineRuntime::get_instance(2, 1048576, false, 0);
+    runtime.reset();
+
+    const std::string ticker = "ACC";
+    const std::size_t NUM_ORDERS = 1000000; // adjust for CI
+    const std::size_t CAPACITY = 1024 * 1024;
+
+    bool ok = runtime.register_stock(ticker, 100.0, 1000.0, CAPACITY);
+    assert(ok && "register_stock should succeed");
+
+    // Ensure auto-match is off on engine prior to submissions
+    runtime.set_auto_match(ticker, false);
+    runtime.process_pending_orders(); // wait for toggle applied
+
+    auto submit_start = std::chrono::high_resolution_clock::now();
+    std::size_t submitted = 0;
+    for (std::size_t i = 0; i < NUM_ORDERS; ++i) {
+        double price = 100.0 + static_cast<double>(i % 10);
+        double qty = 1.0;
+        bool s = runtime.submit_limit_order(ticker, engine::OrderSide::BID, price, qty);
+        if (s) submitted++;
+    }
+    auto submit_end = std::chrono::high_resolution_clock::now();
+    auto submit_ms = std::chrono::duration_cast<std::chrono::milliseconds>(submit_end - submit_start).count();
+
+    double submit_rate = submit_ms > 0 ? (submitted / (submit_ms / 1000.0)) : 0.0;
+    std::cout << " Submitted: " << submitted << " in " << submit_ms << " ms (" << submit_rate << " ops/sec)\n";
+
+    // Now enable auto-match and measure drain time
+    auto drain_start = std::chrono::high_resolution_clock::now();
+    runtime.set_auto_match(ticker, true);
+    // Wait for worker to process toggle and drain queued orders
+    runtime.process_pending_orders();
+    auto drain_end = std::chrono::high_resolution_clock::now();
+    auto drain_ms = std::chrono::duration_cast<std::chrono::milliseconds>(drain_end - drain_start).count();
+
+    // Refresh snapshot and report
+    std::size_t placed = runtime.get_placed_count(ticker);
+    std::size_t filled = runtime.get_filled_count(ticker);
+    std::size_t open = runtime.get_open_count(ticker);
+
+    double drain_rate = drain_ms > 0 ? (placed / (drain_ms / 1000.0)) : 0.0;
+    std::cout << " Drain: processed " << placed << " queued orders in " << drain_ms << " ms (" << drain_rate << " ops/sec)\n";
+    std::cout << " Result: filled=" << filled << ", open=" << open << "\n";
+
+    std::cout << "✓ EngineRuntime accumulate+drain test completed\n";
+}
+
 void test_edge_cases() {
     print_test_header("Edge Cases");
     
@@ -684,6 +737,7 @@ int main() {
         test_async_processing();
         test_stress_performance();
         test_multi_stock_stress();
+            test_accumulate_drain_runtime();
         test_edge_cases();
         test_notifications();
         

@@ -1,6 +1,7 @@
 #pragma once
 #include "../tools/heap.cpp"
 #include "../tools/memory_pool.cpp"
+#include "../tools/lazy_queue.cpp"
 #include <random>
 #include <atomic>
 #include <unordered_set>
@@ -8,6 +9,8 @@
 #include <chrono>
 #include <vector>
 #include <algorithm>
+
+// NOTE: Refactor OrderEngine to use boost:: library for map and heap data strcutures for speed
 
 namespace engine
 {
@@ -52,6 +55,7 @@ namespace engine
         OrderStatus status_; // 1 byte
         OrderType type_; // 1 byte
         OrderSide side_; // 1 byte
+        bool in_book_ = true; // whether this order is currently pushed into the book
 
         OrderInfo() = default;
         OrderInfo(OrderSide side, OrderType type, Quantity qty, Price price) noexcept
@@ -124,6 +128,7 @@ namespace engine
         Price best_bid;
         Price best_ask;
         Price market_price;      // Last trade execution price
+        bool auto_match;         // Current auto-match flag
         Quantity bid_depth[10];  // Top 10 bid levels
         Quantity ask_depth[10];  // Top 10 ask levels
         Price bid_prices[10];
@@ -138,6 +143,7 @@ namespace engine
         MarketSnapshot() noexcept
             : best_bid(-1), best_ask(-1), market_price(-1),
               bid_levels(0), ask_levels(0),
+              auto_match(false),
               placed_count(0), cancelled_count(0), filled_count(0), open_count(0)
         {
             for (int i = 0; i < 10; ++i) 
@@ -155,7 +161,7 @@ namespace engine
     public:
         // engine_id used to build external order ids
         OrderEngine(std::size_t capacity = 1048576, bool verbose = true, bool auto_match = true, std::uint16_t engine_id = 0) noexcept
-        : order_pool_(capacity), recent_order_id_(INVALID_ID),
+        : order_pool_(capacity), order_queue_(),
         placed_count_(0), cancelled_count_(0), filled_count_(0),
         verbose_(verbose), auto_match_(auto_match), last_trade_price_(-1), active_snapshot_(0), engine_id_(engine_id)
         {
@@ -163,18 +169,31 @@ namespace engine
             snapshots_[0] = MarketSnapshot();
             snapshots_[1] = MarketSnapshot();
             published_snapshot_ptr_.store(&snapshots_[active_snapshot_.load(std::memory_order_relaxed)], std::memory_order_relaxed);
+            // Reserve ring buffer capacity to match order pool capacity for predictable behavior
+            order_queue_.reserve(capacity);
         }
 
-        // Encode internal handle into external id with engine prefix:
-        // [16-bit engine_id | 48-bit internal_handle]
+        // OrderId externalization constants and helpers
+        // Layout: [16-bit engine_id | 48-bit internal_handle]
+        static_assert(sizeof(OrderId) == 8, "OrderId expected to be 64-bit");
+        static constexpr OrderId ENGINE_ID_SHIFT = 48;
+        static constexpr OrderId ENGINE_ID_MASK = (static_cast<OrderId>(0xFFFF) << ENGINE_ID_SHIFT);
+        static constexpr OrderId INTERNAL_HANDLE_MASK = ((static_cast<OrderId>(1) << ENGINE_ID_SHIFT) - 1ULL);
+
         static inline OrderId encode_external(std::uint16_t engine_id, OrderId internal_handle) noexcept {
             if (internal_handle == OrderMemoryPool::INVALID_HANDLE) return internal_handle;
-            return (static_cast<OrderId>(engine_id) << 48) | (internal_handle & 0x0000FFFFFFFFFFFFULL);
+            return (static_cast<OrderId>(engine_id) << ENGINE_ID_SHIFT) | (internal_handle & INTERNAL_HANDLE_MASK);
         }
 
         static inline OrderId decode_external(OrderId external_id) noexcept {
             if (external_id == OrderMemoryPool::INVALID_HANDLE) return external_id;
-            return external_id & 0x0000FFFFFFFFFFFFULL;
+            return external_id & INTERNAL_HANDLE_MASK;
+        }
+
+        // Extract the engine id prefix from an external OrderId
+        static inline std::uint16_t extract_engine_id(OrderId external_id) noexcept {
+            if (external_id == OrderMemoryPool::INVALID_HANDLE) return static_cast<std::uint16_t>(-1);
+            return static_cast<std::uint16_t>((external_id & ENGINE_ID_MASK) >> ENGINE_ID_SHIFT);
         }
 
         // POST: Place Order (price in ticks) - returns all messages in vector
@@ -214,7 +233,41 @@ namespace engine
         }
 
         // POST: Set Auto Match Flag
-        void set_auto_match(bool auto_match) noexcept { auto_match_ = auto_match; }
+        void set_auto_match(bool auto_match) noexcept
+        {
+            const bool previous = auto_match_;
+            auto_match_ = auto_match;
+            // If toggling from off -> on, process queued orders in arrival order
+            if (!previous && auto_match_)
+            {
+                while (!order_queue_.empty())
+                {
+                    const QueuedOrder q = order_queue_.front();
+                    order_queue_.pop();
+
+                    const OrderId internal_id = q.id;
+                    if (!order_pool_.is_valid(internal_id)) continue; // Skip freed/cancelled orders
+
+                    OrderInfo& order = order_pool_[internal_id];
+                    // If the order wasn't in the book, push it in now preserving its stored timestamp
+                    if (!order.in_book_)
+                    {
+                        order.in_book_ = true;
+                        push_into_book(order.side_, order.price_, order.time_, internal_id);
+                    }
+
+                    // Simulate matching for this now-pushed order; pass id + pointer
+                    matching_engine(internal_id, &order, nullptr);
+                }
+                // Publish snapshot reflecting new auto_match state after draining
+                update_snapshot_impl();
+            }
+            else
+            {
+                // If toggled (either on->off or on->on without queued orders) still publish snapshot
+                update_snapshot_impl();
+            }
+        }
         // GET: Get Auto Match Flag
         bool get_auto_match() const noexcept { return auto_match_; }
         
@@ -272,15 +325,22 @@ namespace engine
                 }
                 return INVALID_ID;  // Memory Pool full
             }
-            placed_count_.fetch_add(1, std::memory_order_relaxed);
+            placed_count_ += 1;
             const auto& new_order = order_pool_[internal_id];
 
             // external id has engine prefix
             const OrderId id = encode_external(engine_id_, internal_id);
-            // Place Order in book
-            // push_internal into book using internal handle
-            push_into_book(side, new_order.price_, new_order.time_, internal_id);
-            recent_order_id_ = internal_id;
+            // Place Order in book only if auto-matching is enabled. Otherwise queue it.
+            if (auto_match_)
+            {
+                order_pool_[internal_id].in_book_ = true;
+                push_into_book(side, new_order.price_, new_order.time_, internal_id);
+            }
+            else
+            {
+                order_pool_[internal_id].in_book_ = false;
+                order_queue_.emplace(internal_id, new_order.time_);
+            }
 
             if (verbose_ && msgs)
             {
@@ -290,7 +350,8 @@ namespace engine
             // Attempt to match the new order (if auto-matching is enabled)
             if (auto_match_) 
             {
-                matching_engine(msgs);
+                // pass both id and pointer to avoid an extra lookup
+                matching_engine(internal_id, &order_pool_[internal_id], msgs);
             }
 
             // Auto-update snapshot based on interval (0 = manual only)
@@ -316,8 +377,11 @@ namespace engine
 
             OrderInfo& order = order_pool_[internal_id];
 
-            // Pop from book (use internal id)
-            pop_from_book(order.side_, order.price_, order.time_, internal_id);
+            // Pop from book (use internal id) only if it was pushed into the book
+            if (order.in_book_)
+            {
+                pop_from_book(order.side_, order.price_, order.time_, internal_id);
+            }
 
             // Set status before freeing
             order.status_ = OrderStatus::CANCELLED;
@@ -333,7 +397,7 @@ namespace engine
 
             // Free slot (increments generation, invalidating old handles)
             order_pool_.free(internal_id);
-            cancelled_count_.fetch_add(1, std::memory_order_relaxed);
+            cancelled_count_ += 1;
 
             return true; // Order successfully canceled
         }
@@ -354,8 +418,11 @@ namespace engine
 
             OrderInfo& order = order_pool_[internal_id];
 
-            // Pop from old position (internal id)
-            pop_from_book(order.side_, order.price_, order.time_, internal_id);
+            // Pop from old position (internal id) only if currently in book
+            if (order.in_book_)
+            {
+                pop_from_book(order.side_, order.price_, order.time_, internal_id);
+            }
 
             // Modify order info
             order.side_ = side;
@@ -369,9 +436,18 @@ namespace engine
             else if (side == OrderSide::BID && ask_book_.size() && price > ask_book_.peek())
                 order.price_ = ask_book_.peek();
 
-            // Push to new position (internal id)
-            push_into_book(side, order.price_, order.time_, internal_id);
-            recent_order_id_ = internal_id;
+            // Push to new position (internal id) only if auto-matching is enabled
+            if (auto_match_)
+            {
+                order.in_book_ = true;
+                push_into_book(side, order.price_, order.time_, internal_id);
+            }
+            else
+            {
+                // Keep the order queued (not in the book)
+                order.in_book_ = false;
+                order_queue_.emplace(internal_id, order.time_);
+            }
 
             if (verbose_ && msgs)
             {
@@ -381,7 +457,7 @@ namespace engine
             // Attempt to match the modified order (if auto-matching is enabled)
             if (auto_match_) 
             {
-                matching_engine(msgs);
+                matching_engine(internal_id, &order_pool_[internal_id], msgs);
             }
 
             // Auto-update snapshot based on interval
@@ -524,57 +600,69 @@ namespace engine
             }
         }
         
-        // Matching Engine - takes optional message collector for fill notifications
-        void matching_engine(std::vector<EngineMsg>* fill_notifications) noexcept
+        // Matching Engine - takes the recent order id + pointer (for faster first access)
+        void matching_engine(OrderId recent_internal_id, OrderInfo* recent_order_ptr, std::vector<EngineMsg>* fill_notifications) noexcept
         {
-            if (ask_book_.empty() || bid_book_.empty())
-                return;  // Need both sides to match
-        
-            while (order_pool_[recent_order_id_].qty_ > 0)
+            if (recent_internal_id == OrderMemoryPool::INVALID_HANDLE) return;
+            if (!order_pool_.is_valid(recent_internal_id)) return;
+            if (ask_book_.empty() || bid_book_.empty()) return;  // Need both sides to match
+
+            // Use the provided pointer for the first access to avoid a lookup; subsequent iterations re-fetch.
+            OrderInfo* recent = recent_order_ptr;
+
+            while (order_pool_.is_valid(recent_internal_id))
             {
-                OrderInfo& recent_order = order_pool_[recent_order_id_];
-                
+                if (!recent) recent = order_pool_.get(recent_internal_id);
+                if (!recent) break;
+                if (recent->qty_ == 0) break;
+
                 // Get best prices ONCE per iteration
                 const Price best_ask_price = ask_book_.peek();
                 const Price best_bid_price = bid_book_.peek();
-                
+
                 // MARKET orders walk the book - move to current best price level
-                if (recent_order.type_ == OrderType::MARKET)
+                if (recent->type_ == OrderType::MARKET)
                 {
-                    const Price new_price = (recent_order.side_ == OrderSide::ASK) 
-                        ? best_bid_price : best_ask_price;
-                    
-                    if (new_price != recent_order.price_)
+                    const Price new_price = (recent->side_ == OrderSide::ASK) ? best_bid_price : best_ask_price;
+                    if (new_price != recent->price_)
                     {
-                        // Move order to new price level
-                        pop_from_book(recent_order.side_, recent_order.price_, recent_order.time_, recent_order_id_);
-                        recent_order.price_ = new_price;
-                        push_into_book(recent_order.side_, recent_order.price_, recent_order.time_, recent_order_id_);
+                        // Move order to new price level (only if it's currently in the book)
+                        if (recent->in_book_)
+                        {
+                            pop_from_book(recent->side_, recent->price_, recent->time_, recent_internal_id);
+                            recent->price_ = new_price;
+                            push_into_book(recent->side_, recent->price_, recent->time_, recent_internal_id);
+                        }
+                        else
+                        {
+                            recent->price_ = new_price;
+                        }
                     }
                 }
-                
+
                 // Check if trade is possible (early exit before any lookups)
-                const bool can_trade = (recent_order.side_ == OrderSide::ASK && best_bid_price >= recent_order.price_) ||
-                                    (recent_order.side_ == OrderSide::BID && best_ask_price <= recent_order.price_);
-                if (!can_trade)
-                    break;  // No match possible
-                
+                const bool can_trade = (recent->side_ == OrderSide::ASK && best_bid_price >= recent->price_) ||
+                                       (recent->side_ == OrderSide::BID && best_ask_price <= recent->price_);
+                if (!can_trade) break;  // No match possible
+
                 // Get price levels
                 OrderLevel& best_ask_level = ask_levels_[best_ask_price];
                 OrderLevel& best_bid_level = bid_levels_[best_bid_price];
-                
-                if (best_ask_level.empty() || best_bid_level.empty())
-                    break;
-                
+
+                if (best_ask_level.empty() || best_bid_level.empty()) break;
+
                 // Get order IDs from levels
                 const OrderId best_ask_id = best_ask_level.peek().second;
                 const OrderId best_bid_id = best_bid_level.peek().second;
-                
+
                 // Match based on recent order side
-                if (recent_order.side_ == OrderSide::ASK)
-                    matching(recent_order_id_, best_bid_id, best_ask_level, best_bid_level, fill_notifications);
+                if (recent->side_ == OrderSide::ASK)
+                    matching(recent_internal_id, best_bid_id, best_ask_level, best_bid_level, fill_notifications);
                 else
-                    matching(best_ask_id, recent_order_id_, best_ask_level, best_bid_level, fill_notifications);
+                    matching(best_ask_id, recent_internal_id, best_ask_level, best_bid_level, fill_notifications);
+
+                // After matching call, in case recent was filled/freed, invalidate recent pointer so next loop re-fetches
+                recent = nullptr;
             }
         }
 
@@ -625,7 +713,7 @@ namespace engine
                 }
 
                 order_pool_.free(best_ask_id);
-                filled_count_.fetch_add(1, std::memory_order_relaxed);
+                filled_count_ += 1;
             }
             else if (verbose_ && fill_notifications)
             {
@@ -654,7 +742,7 @@ namespace engine
                 }
 
                 order_pool_.free(best_bid_id);
-                filled_count_.fetch_add(1, std::memory_order_relaxed);
+                filled_count_ += 1;
             }
             else if (verbose_ && fill_notifications)
             {
@@ -672,11 +760,12 @@ namespace engine
             snap.best_bid = top_bid_heap_.empty() ? static_cast<Price>(-1) : top_bid_heap_.peek();
             snap.best_ask = top_ask_heap_.empty() ? static_cast<Price>(-1) : top_ask_heap_.peek();
             snap.market_price = last_trade_price_;
+            snap.auto_match = auto_match_;
             
             // Order counts
-            snap.placed_count = placed_count_.load(std::memory_order_relaxed);
-            snap.cancelled_count = cancelled_count_.load(std::memory_order_relaxed);
-            snap.filled_count = filled_count_.load(std::memory_order_relaxed);
+            snap.placed_count = placed_count_;
+            snap.cancelled_count = cancelled_count_;
+            snap.filled_count = filled_count_;
             snap.open_count = order_pool_.active_count();
 
             // Build top K bid levels from top-K heap (O(K) iteration + O(1) cache lookups)
@@ -732,16 +821,18 @@ namespace engine
         
          // OrderBook System
         OrderMemoryPool order_pool_; // Memory Pool for Orders with generational handles
+        struct QueuedOrder { OrderId id; Timestamp time; QueuedOrder() = default; QueuedOrder(OrderId i, Timestamp t) noexcept : id(i), time(t) {} };
+        LazyQueue<QueuedOrder> order_queue_; // Queue for orders when auto-match is off
         AskBook ask_book_;      // Asks Order Book
         BidBook bid_book_;      // Bids Order Book
         LevelMap ask_levels_;   // Asks Price Levels
         LevelMap bid_levels_;   // Bids Price Levels
         TopBidHeap top_bid_heap_; // Top K bid prices (eagerly maintained)
         TopAskHeap top_ask_heap_; // Top K ask prices (eagerly maintained)
-        OrderId recent_order_id_; // Most recently placed order (generational handle)
-        std::atomic<std::size_t> placed_count_;    // Total orders successfully placed
-        std::atomic<std::size_t> cancelled_count_; // Total orders cancelled
-        std::atomic<std::size_t> filled_count_;    // Total orders filled
+        // recent_order_id_ removed; matching now uses queued ids and direct OrderInfo* references
+        std::size_t placed_count_;    // Total orders successfully placed
+        std::size_t cancelled_count_; // Total orders cancelled
+        std::size_t filled_count_;    // Total orders filled
         bool verbose_;            // Verbose Mode Flag
         bool auto_match_;       // Auto Matching Flag
         Price last_trade_price_; // Last trade execution price

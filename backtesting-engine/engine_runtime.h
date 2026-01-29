@@ -3,7 +3,6 @@
 
 #include "order_engine.h"
 #include "job_scheduler.h"
-#include "trading_strategy.h"
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -85,6 +84,9 @@ namespace runtime
         const engine::OrderEngine* get_engine(const std::string& ticker) const;
         bool set_auto_match(const std::string& ticker, bool auto_match);
         bool get_auto_match(const std::string& ticker) const;
+        // Control runtime batching (flush threshold before submitting to scheduler)
+        void set_batch_size(std::size_t batch_size) noexcept;
+        std::size_t get_batch_size() const noexcept;
         
         // Processing
         void process_pending_orders();

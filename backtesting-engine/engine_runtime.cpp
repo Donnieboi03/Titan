@@ -1,12 +1,13 @@
 #pragma once
 #include "order_engine.cpp"
-#include "job_scheduler.cpp"
-#include "../tools/ring_buffer.cpp"
+#include "../tools/job_scheduler.cpp"
+#include "../tools/lazy_queue.cpp"
 #include <unordered_set>
 #include <functional>
 #include <cmath>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <chrono>
 #include <vector>
 #include <atomic>
@@ -234,15 +235,11 @@ namespace runtime
         {}
 
         // Constructor for in-place construction
-                OrderEngineInfo(std::size_t capacity, bool verbose, 
-                        engine::Quantity ipo_shares, scheduler::WorkerId worker_id, EngineId engine_id)
-                        : engine_(std::make_unique<engine::OrderEngine>(capacity, verbose, true, static_cast<std::uint16_t>(engine_id))),
-                            ipo_shares_(ipo_shares),
-                            worker_id_(worker_id)
-                {}
+        OrderEngineInfo(std::size_t capacity, bool verbose, engine::Quantity ipo_shares, scheduler::WorkerId worker_id, EngineId engine_id)
+            : engine_(std::make_unique<engine::OrderEngine>(capacity, verbose, true, static_cast<std::uint16_t>(engine_id))),
+              ipo_shares_(ipo_shares), worker_id_(worker_id)
+        {}
     };
-
-
 
     using EngineMap = std::vector<OrderEngineInfo>;
     using TickerMap = std::unordered_map<std::string, EngineId>;
@@ -332,8 +329,9 @@ namespace runtime
         
         std::atomic<bool> notification_thread_running_{false}; // Notification thread control
         std::thread notification_thread_; // Notification thread for verbose output
-        RingBuffer<std::string> notification_buffer_; // Buffer for notification messages
+        LazyQueue<std::string> notification_buffer_; // Buffer for notification messages
         mutable std::mutex notification_mutex_; // Mutex for notification buffer
+        std::condition_variable notification_cv_; // Sleep-lock for notification thread
         
         // Order ownership tracking: user_orders_[user_id][engine_id] = {order_ids}
         // Index 0 reserved for IPO_HOLDER, registered users start from index 1
@@ -351,6 +349,8 @@ namespace runtime
         
         // Quantum execution control (configured at construction)
         const std::size_t quantum_orders_; // Quantum in order count (immutable after construction)
+        // Runtime-enforced batch size for flushing jobs to workers
+        std::size_t runtime_batch_size_;
         // Global quantum counter for strategy execution (shared across engines)
         std::atomic<std::size_t> global_orders_since_quantum_{0};
         
@@ -366,7 +366,6 @@ namespace runtime
         
         // Processing loops
         void notification_loop() noexcept;
-        void process_notifications() noexcept;
         
         // Snapshot management (internal)
         void update_snapshot_internal(EngineId engine_id) noexcept;
@@ -377,6 +376,9 @@ namespace runtime
         
         // Utilities
         void notify(const std::string& message) noexcept;
+        
+        // Internal wrapper to submit jobs to a worker while enforcing runtime batch-size
+        void submit_job_on_worker(scheduler::WorkerId worker_id, scheduler::Job&& job) noexcept;
     };
 
     // EngineRuntime Implementation
@@ -413,11 +415,12 @@ namespace runtime
         global_orders_since_quantum_(0),
         notification_buffer_(1000)
     {
+        // Initialize runtime batch size to scheduler's batch capacity by default
+        runtime_batch_size_ = scheduler_.get_batch_capacity();
         engines_info_.reserve(100);  // Reserve space for up to 100 engine pointers
+        
+        // ensure we have room for common workloads. Index 0 (IPO HOLDER) is reserved
         users_.reserve(1000);    // Reserve space for up to 100 users
-        // Reserve space for user order tracking to avoid reallocations and
-        // ensure we have room for common workloads. Index 0 is reserved
-        // for the IPO holder; user IDs start at 1.
         user_orders_.reserve(users_.capacity());
         // Ensure IPO holder slot exists
         if (user_orders_.empty()) {
@@ -442,7 +445,7 @@ namespace runtime
         }
     }
 
-
+    
 
     void runtime::EngineRuntime::start_notification_thread() noexcept
     {
@@ -456,6 +459,8 @@ namespace runtime
     void runtime::EngineRuntime::stop_notification_thread() noexcept
     {
         notification_thread_running_ = false;
+        // Wake notification thread so it can exit promptly
+        notification_cv_.notify_one();
         if (notification_thread_.joinable()) 
         {
             notification_thread_.join();
@@ -466,32 +471,36 @@ namespace runtime
 
     void runtime::EngineRuntime::notification_loop() noexcept
     {
+        std::unique_lock<std::mutex> lock(notification_mutex_);
         while (notification_thread_running_) 
         {
-            process_notifications();
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            // Wait until there is a message or the thread is asked to stop
+            notification_cv_.wait(lock, [this]() {
+                return !notification_buffer_.empty() || !notification_thread_running_;
+            });
+
+            // Drain available messages
+            while (!notification_buffer_.empty()) {
+                std::string message = notification_buffer_.front();
+                notification_buffer_.pop();
+                // Unlock while performing IO to avoid blocking producers
+                lock.unlock();
+                std::cout << message << std::endl;
+                lock.lock();
+            }
         }
     }
-
-    void runtime::EngineRuntime::process_notifications() noexcept
-    {
-        std::lock_guard<std::mutex> lock(notification_mutex_);
-        while (!notification_buffer_.empty()) 
-        {
-            std::string message = notification_buffer_.front();
-            notification_buffer_.pop();
-            std::cout << message << std::endl;
-        }
-    }
-
-
 
     void EngineRuntime::notify(const std::string& message) noexcept
     {
         if (verbose_ && notification_thread_running_) 
         {
-            std::lock_guard<std::mutex> lock(notification_mutex_);
-            notification_buffer_.push(message);
+            {
+                std::lock_guard<std::mutex> lock(notification_mutex_);
+                notification_buffer_.push(message);
+            }
+            // Wake the notification thread
+            notification_cv_.notify_one();
         }
     }
 
@@ -545,7 +554,7 @@ namespace runtime
             engine::Quantity ipo_qty_ticks = math::qty_to_internal(_ipo_qty);
 
             // Use provided capacity or default
-            std::size_t engine_capacity = capacity > 0 ? capacity : default_capacity_;
+            std::size_t engine_capacity = capacity > 0 ? std::min(capacity, default_capacity_) : default_capacity_;
             
             // Calculate engine ID from vector size before emplacing
             EngineId engine_id = engines_info_.size();
@@ -849,8 +858,8 @@ namespace runtime
 
         }, engine_id); // Use engine_id as owner_id
         
-            // Use submit_job_on with stored worker_id
-            scheduler_.submit_job_on(engine_info.worker_id_, std::move(job));
+            // Use runtime wrapper to enforce batch-size then submit
+            submit_job_on_worker(engine_info.worker_id_, std::move(job));
             return true;
         } catch (const std::exception& e) {
             notify("[LIMIT ORDER] EXCEPTION: " + std::string(e.what()));
@@ -1004,7 +1013,7 @@ namespace runtime
             }
         }, engine_id);
 
-            scheduler_.submit_job_on(engine_info.worker_id_, std::move(job));
+            submit_job_on_worker(engine_info.worker_id_, std::move(job));
             return true;
         } catch (const std::exception& e) {
             notify("[MARKET ORDER] EXCEPTION: " + std::string(e.what()));
@@ -1107,7 +1116,7 @@ namespace runtime
             runtime_ptr->increment_order_counter(engine_id);
         }, engine_id);
 
-            scheduler_.submit_job_on(engine_info.worker_id_, std::move(job));
+            submit_job_on_worker(engine_info.worker_id_, std::move(job));
             return true;
         } catch (const std::exception& e) {
             notify("[CANCEL ORDER] EXCEPTION: " + std::string(e.what()));
@@ -1244,7 +1253,7 @@ namespace runtime
             runtime_ptr->increment_order_counter(engine_id);
         }, engine_id);
 
-            scheduler_.submit_job_on(engine_info.worker_id_, std::move(job));
+            submit_job_on_worker(engine_info.worker_id_, std::move(job));
             return true;
         } catch (const std::exception& e) {
             notify("[EDIT ORDER] EXCEPTION: " + std::string(e.what()));
@@ -1436,13 +1445,21 @@ namespace runtime
             if (ticker_it == ticker_to_engine_id_.end()) {
                 return false;
             }
-            
+
             EngineId engine_id = ticker_it->second;
             if (engine_id >= engines_info_.size()) {
                 return false;
             }
-            
-            engines_info_[engine_id].engine_->set_auto_match(auto_match);
+
+            auto& engine_info = engines_info_[engine_id];
+
+            // Schedule the auto-match toggle on the engine's worker thread
+            auto job = scheduler::make_job([engine_id, auto_match, runtime_ptr = this]() {
+                if (engine_id >= runtime_ptr->engines_info_.size()) return;
+                runtime_ptr->engines_info_[engine_id].engine_->set_auto_match(auto_match);
+            }, engine_id);
+
+            submit_job_on_worker(engine_info.worker_id_, std::move(job));
             return true;
         } catch (...) {
             return false;
@@ -1461,8 +1478,15 @@ namespace runtime
             if (engine_id >= engines_info_.size()) {
                 return false;
             }
-            
-            return engines_info_[engine_id].engine_->get_auto_match();
+            // In batch mode (quantum == 0) perform a synchronous snapshot
+            // update so callers observing the API get the latest state.
+            if (quantum_orders_ == 0) {
+                const_cast<EngineRuntime*>(this)->update_snapshot_internal(engine_id);
+            }
+
+            const engine::MarketSnapshot* snap = get_snapshot_fast(engine_id);
+            if (!snap) return false;
+            return snap->auto_match;
         } catch (...) {
             return false;
         }
@@ -1500,17 +1524,33 @@ namespace runtime
         }
     }
 
-    // TODO: Integrate Configuration into Runtime Batching System
-    // void runtime::EngineRuntime::set_batch_size(std::size_t n) noexcept
-    // {
-    //     scheduler_.set_batch_size(n);
-    // }
+    void runtime::EngineRuntime::set_batch_size(std::size_t n) noexcept
+    {
+        // Enforce a minimum of 1
+        runtime_batch_size_ = (n == 0) ? 1 : n;
+    }
 
-    // std::size_t runtime::EngineRuntime::get_batch_size() const noexcept
-    // {
-    //     // scheduler_.get_batch_size() is non-const; call via const_cast
-    //     return const_cast<EngineRuntime*>(this)->scheduler_.get_batch_size();
-    // }
+    std::size_t runtime::EngineRuntime::get_batch_size() const noexcept
+    {
+        return runtime_batch_size_;
+    }
+
+    void runtime::EngineRuntime::submit_job_on_worker(scheduler::WorkerId worker_id, scheduler::Job&& job) noexcept
+    {
+        // Defensive: ensure worker id valid
+        if (worker_id >= scheduler_.get_worker_count()) return;
+
+        // If pending jobs for this worker reach or exceed runtime batch size,
+        // flush/execute them before adding another job to keep batches bounded.
+        if (runtime_batch_size_ > 0) {
+            const std::size_t pending = scheduler_.pending_jobs_on(worker_id);
+            if (pending + 1 >= runtime_batch_size_) {
+                scheduler_.process_jobs_on(worker_id);
+            }
+        }
+
+        scheduler_.submit_job_on(worker_id, std::forward<scheduler::Job>(job));
+    }
 
     std::vector<engine::OrderId> EngineRuntime::get_positions(UserId user_id, const std::string& ticker) const
     {

@@ -95,7 +95,7 @@ int main(int argc, char** argv)
 
     std::cout << "Registered trader with user_id=" << trader->get_user_id() << " and capital=$" << trader->get_capital() << "\n";
 
-    //runtime.set_batch_size(16);
+    runtime.set_batch_size(16);
     // Seed varied orders across the two tickers to create realistic book state
     for (int i = 0; i < 256; ++i) {
         const char* ticker = (i % 2 == 0) ? "EXM" : "ACME";
@@ -104,9 +104,6 @@ int main(int argc, char** argv)
         double price = base + ((i % 5) - 2) * 0.25; // vary around IPO
         double qty = 0.5 + (i % 4) * 0.5;
         runtime.submit_limit_order(ticker, side, price, qty);
-
-        if ((i + 1) % 4 == 0)
-            runtime.process_pending_orders();
     }
 
     // Add a couple of more aggressive orders
