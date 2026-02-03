@@ -1,11 +1,9 @@
-#include "../engine_runtime.cpp"
+#include "../engine_runtime.cpp"  // Includes everything in ONE compilation unit
+#include "../order_engine.cpp"
 #include <iostream>
 #include <string>
 #include <chrono>
 #include <thread>
-
-using namespace runtime;
-using namespace engine;
 
 // Simple example showing how a user of the API would drive the runtime
 //  - Create runtime with configurable workers and capacity
@@ -39,9 +37,9 @@ int main(int argc, char** argv)
     std::cout << "Starting example runtime with " << num_workers << " workers and capacity " << capacity << "\n";
 
     // Reset any existing singleton instance and create a fresh runtime
-    EngineRuntime::reset_instance();
+    backtest::runtime::EngineRuntime::reset_instance();
     // NOTE: quantum must be > 0 for strategies to be triggered. Use quantum = 4 here.
-    auto& runtime = EngineRuntime::get_instance(num_workers, capacity, true, 4 /* quantum */);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(num_workers, capacity, false);
 
     // Register a couple of stocks that the strategy can trade
     runtime.register_stock("EXM", 100.00, 1000.0); // example stock
@@ -51,9 +49,9 @@ int main(int argc, char** argv)
     runtime.process_pending_orders();
 
     // Register a more complex, stateful strategy that alternates actions
-    auto state = std::make_shared<std::unordered_map<UserId, std::atomic<int>>>();
-    auto complex_strategy = [state](User* u) {
-        UserId id = u->get_user_id();
+    auto state = std::make_shared<std::unordered_map<backtest::user::UserId, std::atomic<int>>>();
+    auto complex_strategy = [state](backtest::user::User* u) {
+        backtest::user::UserId id = u->get_user_id();
         std::atomic<int>& cnt = (*state)[id];
         auto strat = cnt.fetch_add(1, std::memory_order_relaxed);
 
@@ -66,28 +64,28 @@ int main(int argc, char** argv)
         // Behavior rotates every call: 1=aggressive buy EXM, 2=place passive sell if we have position, 3=opportunistic market buy ACME
         if (strat % 3 == 1) {
             if (exm_ask > 0) {
-                bool ok = u->submit_limit_order("EXM", OrderSide::BID, exm_ask, 1.0);
+                bool ok = u->submit_limit_order("EXM", engine::OrderSide::BID, exm_ask, 1.0);
                 if (ok) std::cout << "[strategy] user " << id << " placed limit BUY EXM @ " << exm_ask << "\n";
             }
         } else if (strat % 3 == 2) {
-            auto pos = u->get_open_positions("EXM");
+            auto pos = u->get_positions("EXM");
             if (!pos.empty() && exm_bid > 0) {
                 // Try to take profit with a slightly higher ask
                 double sell_price = exm_bid + 0.02;
-                bool ok = u->submit_limit_order("EXM", OrderSide::ASK, sell_price, 1.0);
+                bool ok = u->submit_limit_order("EXM", engine::OrderSide::ASK, sell_price, 1.0);
                 if (ok) std::cout << "[strategy] user " << id << " placed limit SELL EXM @ " << sell_price << "\n";
             }
         } else {
             // Opportunistic market buy on ACME if there's available ask
             if (acme_ask > 0) {
-                bool ok = u->submit_market_order("ACME", OrderSide::BID, 0.5);
+                bool ok = u->submit_market_order("ACME", engine::OrderSide::BID, 0.5);
                 if (ok) std::cout << "[strategy] user " << id << " submitted MARKET BUY ACME @ " << acme_ask << "\n";
             }
         }
     };
 
     // Register the strategy as a user and give it some starting capital
-    User* trader = runtime.register_strategy(complex_strategy);
+    backtest::user::User* trader = runtime.register_strategy(complex_strategy);
     if (!trader) {
         std::cerr << "Failed to register strategy/user" << std::endl;
         return 1;
@@ -95,11 +93,11 @@ int main(int argc, char** argv)
 
     std::cout << "Registered trader with user_id=" << trader->get_user_id() << " and capital=$" << trader->get_capital() << "\n";
 
-    runtime.set_batch_size(16);
+    runtime.set_batch_size(32);
     // Seed varied orders across the two tickers to create realistic book state
     for (int i = 0; i < 256; ++i) {
         const char* ticker = (i % 2 == 0) ? "EXM" : "ACME";
-        OrderSide side = (i % 3 == 0) ? OrderSide::BID : OrderSide::ASK;
+        engine::OrderSide side = (i % 3 == 0) ? engine::OrderSide::BID : engine::OrderSide::ASK;
         double base = (std::string(ticker) == "EXM") ? 100.00 : 25.50;
         double price = base + ((i % 5) - 2) * 0.25; // vary around IPO
         double qty = 0.5 + (i % 4) * 0.5;
@@ -107,14 +105,14 @@ int main(int argc, char** argv)
     }
 
     // Add a couple of more aggressive orders
-    runtime.submit_limit_order("EXM", OrderSide::ASK, 101.50, 2.0);
-    runtime.submit_limit_order("ACME", OrderSide::BID, 25.40, 10.0);
+    runtime.submit_limit_order("EXM", engine::OrderSide::ASK, 101.50, 2.0);
+    runtime.submit_limit_order("ACME", engine::OrderSide::BID, 25.40, 10.0);
 
     // Process jobs so that seeded orders are handled and strategies will be invoked by quantum
     runtime.process_pending_orders();
 
     // Now inspect results: positions, best bid/ask and PnL
-    auto exm_positions = trader->get_open_positions("EXM");
+    auto exm_positions = trader->get_positions("EXM");
     std::cout << "Trader EXM open positions count: " << exm_positions.size() << "\n";
 
     double best_bid = trader->get_best_bid("EXM");

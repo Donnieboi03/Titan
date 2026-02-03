@@ -12,3 +12,9 @@ logs/
 # debug symbol files
 *.dSYM
 **/*.dSYM/
+
+# temporarly hidden
+python/
+examples/
+docs/
+.txt
