@@ -1,4 +1,5 @@
 #include "../engine_runtime.cpp"
+#include "../order_engine.cpp"
 #include <iostream>
 #include <vector>
 #include <cassert>
@@ -16,9 +17,9 @@ void print_test_header(const std::string& test_name) {
 
 void test_singleton_pattern() {
     print_test_header("Singleton Pattern");
-    runtime::EngineRuntime::reset_instance();    
-        auto& runtime1 = runtime::EngineRuntime::get_instance(1, 1048576 * 4, false, 0);  // Use proper capacity
-    auto& runtime2 = runtime::EngineRuntime::get_instance(4, 2000000, false, 0); // Should be same instance, params ignored
+    backtest::runtime::EngineRuntime::reset_instance();    
+        auto& runtime1 = backtest::runtime::EngineRuntime::get_instance(1, 1048576 * 4, false, 0);  // Use proper capacity
+    auto& runtime2 = backtest::runtime::EngineRuntime::get_instance(4, 2000000, false, 0); // Should be same instance, params ignored
     
     // Both references should point to the same instance
     assert(&runtime1 == &runtime2);
@@ -28,9 +29,8 @@ void test_singleton_pattern() {
 void test_stock_registration() {
     print_test_header("Stock Registration");
     
-    runtime::EngineRuntime::reset_instance();
-        auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
-    runtime.reset();
+    backtest::runtime::EngineRuntime::reset_instance();
+        auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     
     // Test normal registration
     bool success = runtime.register_stock("BTC", 50000.00, 2.0);
@@ -75,9 +75,8 @@ void test_stock_registration() {
 void test_market_data_reads() {
     print_test_header("Market Data Reads");
     
-    runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
-    runtime.reset();
+    backtest::runtime::EngineRuntime::reset_instance();
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     
     // Register a stock
     bool success = runtime.register_stock("TSLA", 200.00, 100.0);
@@ -105,9 +104,8 @@ void test_market_data_reads() {
 void test_limit_orders() {
     print_test_header("Limit Orders");
     
-    runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
-    runtime.reset();
+    backtest::runtime::EngineRuntime::reset_instance();
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     
     // Register stock
     bool success = runtime.register_stock("NVDA", 800.00, 50.0);
@@ -152,9 +150,8 @@ void test_limit_orders() {
 void test_market_orders() {
     print_test_header("Market Orders");
     
-    runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
-    runtime.reset();
+    backtest::runtime::EngineRuntime::reset_instance();
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     
     // Register stock with lower quantity for easier testing
     bool success = runtime.register_stock("MSFT", 300.00, 10.0);
@@ -187,9 +184,8 @@ void test_market_orders() {
 void test_order_cancellation() {
     print_test_header("Order Cancellation");
     
-    runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
-    runtime.reset();
+    backtest::runtime::EngineRuntime::reset_instance();
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     
     // Register stock
     bool success = runtime.register_stock("AMZN", 3000.00, 20.0);
@@ -200,7 +196,7 @@ void test_order_cancellation() {
     runtime.process_pending_orders();
     
     // Get positions to find the order ID
-    auto positions = runtime.get_positions(0, "AMZN");
+    auto positions = runtime.user_get_positions(0, "AMZN");
     
     if (!positions.empty()) {
         // Try to cancel the first order (or second if IPO is first)
@@ -215,9 +211,8 @@ void test_order_cancellation() {
 void test_order_editing() {
     print_test_header("Order Editing");
     
-    runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
-    runtime.reset();
+    backtest::runtime::EngineRuntime::reset_instance();
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     
     // Register stock
     bool success = runtime.register_stock("GOOGL", 2800.00, 15.0);
@@ -228,7 +223,7 @@ void test_order_editing() {
     runtime.process_pending_orders();
     
     // Get order ID (expecting IPO order for user 0 plus our order)
-    auto positions = runtime.get_positions(0, "GOOGL");
+    auto positions = runtime.user_get_positions(0, "GOOGL");
     if (positions.size() == 2) {
         // IPO order is at position 0, user order at position 1
         std::cout << "✓ User has 2 positions as expected (1 IPO + 1 user order)" << std::endl;
@@ -272,9 +267,8 @@ void test_order_editing() {
 void test_multi_user_trading() {
     print_test_header("Multi-User Trading");
     
-    runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
-    runtime.reset();
+    backtest::runtime::EngineRuntime::reset_instance();
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     
     // Register stock
     bool success = runtime.register_stock("META", 250.00, 100.0);
@@ -309,9 +303,8 @@ void test_multi_user_trading() {
 void test_async_processing() {
     print_test_header("Async Processing");
     
-    runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
-    runtime.reset();
+    backtest::runtime::EngineRuntime::reset_instance();
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     
     const int BASIC_TEST_ORDERS = 50;
     
@@ -357,11 +350,10 @@ void test_async_processing() {
 void test_stress_performance() {
     print_test_header("Stress Testing & Performance");
     
-    runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(1, 1048576 * 2, false, 0);  // 1 thread for single stock
-    runtime.reset();
+    backtest::runtime::EngineRuntime::reset_instance();
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(1, 1048576, false, 0);  // 1 thread for single stock
     
-    const int STRESS_TEST_ORDERS = 1000000;  // 10M orders
+    const int STRESS_TEST_ORDERS = 10000000;  // 10M orders
     
     // Register stock for stress testing with sufficient capacity
     bool success = runtime.register_stock("STRESS", 100.00, 10000.0);  // capacity=0 uses default
@@ -419,8 +411,8 @@ void test_stress_performance() {
     std::cout << "Phase 2: Testing order cancellation..." << std::endl;
     
     // Get half the orders to cancel
-    auto positions = runtime.get_positions(0, "STRESS");
-    std::size_t cancel_count = std::min(positions.size() / 2, (std::size_t)500000);  // Cancel up to 500k
+    auto positions = runtime.user_get_positions(0, "STRESS");
+    std::size_t cancel_count = std::min(static_cast<std::size_t>(positions.size() / 2), static_cast<std::size_t>(500000));  // Cancel up to 500k
     
     auto cancel_start = std::chrono::high_resolution_clock::now();
     for (std::size_t i = 0; i < cancel_count; ++i) {
@@ -443,8 +435,8 @@ void test_stress_performance() {
     std::cout << "Phase 3: Testing order editing..." << std::endl;
     
     // Get remaining orders to edit
-    auto remaining_positions = runtime.get_positions(0, "STRESS");
-    std::size_t edit_count = std::min(remaining_positions.size() / 2, (std::size_t)250000);  // Edit up to 250k
+    auto remaining_positions = runtime.user_get_positions(0, "STRESS");
+    std::size_t edit_count = std::min(static_cast<std::size_t>(remaining_positions.size() / 2), static_cast<std::size_t>(250000));  // Edit up to 250k
     
     auto edit_start = std::chrono::high_resolution_clock::now();
     for (std::size_t i = 0; i < edit_count; ++i) {
@@ -489,9 +481,8 @@ void test_multi_stock_stress() {
     const int ORDERS_PER_STOCK = 10000000;  // 10M orders per stock = 80M total
     const int NUM_WORKERS = 8;  // One worker per stock for optimal parallelism
     
-    runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(NUM_WORKERS, 1048576, false, 0);
-    runtime.reset();
+    backtest::runtime::EngineRuntime::reset_instance();
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(NUM_WORKERS, 1048576, false, 0);
     
     std::cout << "=== Multi-Stock Test (" << NUM_STOCKS << " stocks, " 
               << ORDERS_PER_STOCK << " orders each, " << NUM_STOCKS * ORDERS_PER_STOCK 
@@ -588,9 +579,8 @@ void test_accumulate_drain_runtime()
 {
     print_test_header("Accumulate (auto_match=off) then Drain via EngineRuntime");
 
-    runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(2, 1048576, false, 0);
-    runtime.reset();
+    backtest::runtime::EngineRuntime::reset_instance();
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(2, 1048576, false, 0);
 
     const std::string ticker = "ACC";
     const std::size_t NUM_ORDERS = 1000000; // adjust for CI
@@ -640,9 +630,8 @@ void test_accumulate_drain_runtime()
 void test_edge_cases() {
     print_test_header("Edge Cases");
     
-    runtime::EngineRuntime::reset_instance();
-    auto& runtime = runtime::EngineRuntime::get_instance(4, 10000, false, 0);
-    runtime.reset();
+    backtest::runtime::EngineRuntime::reset_instance();
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
     
     // Test operations on non-existent ticker
     runtime.submit_limit_order("NONEXISTENT", engine::OrderSide::BID, 100.0, 1.0);
@@ -674,10 +663,9 @@ void test_edge_cases() {
 void test_notifications() {
     print_test_header("Notification System");
     
-    runtime::EngineRuntime::reset_instance();
+    backtest::runtime::EngineRuntime::reset_instance();
     // Enable verbose mode to activate notification system
-    auto& runtime = runtime::EngineRuntime::get_instance(2, 10000, true, 0);
-    runtime.reset();
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(2, 10000, true, 0);
     
     std::cout << "=== Testing notification system with verbose=true ===" << std::endl;
     

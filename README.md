@@ -3,6 +3,8 @@
 Titan is a high‑performance backtesting engine for **algorithmic trading strategies** built on a modern C++20 core with a **Python-first** interface.  
 It is designed for realistic **Level‑3 (order‑by‑order)** market simulations, multi‑agent experiments, and research‑grade performance studies.
 
+**Why Titan:** For practitioners and researchers in high-frequency trading (crypto or equities), Titan lets you stress-test and evaluate multiple strategies at once across multiple simulated markets—all concurrently—with a single, deterministic run.
+
 ---
 
 ### What Titan Gives You
@@ -56,6 +58,8 @@ cd ..
 # Install Python package in editable mode
 pip install -e .
 ```
+
+**Quick validation:** From the repo root, run C++ tests with `cd build && ctest` (after building). Once the Python extension is built, run `python examples/backtest_single.py` for a minimal end‑to‑end backtest.
 
 ---
 
