@@ -27,3 +27,7 @@ dist/
 
 # Keep .txt only if you use it for temp notes
 # .txt
+
+# Market data example files (too large for git — use download_market_data.py to populate)
+core/test/examples/*.bin
+core/test/examples/*.csv.gz
