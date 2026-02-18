@@ -1,0 +1,209 @@
+Starting EngineRuntime Tests...
+
+============================================================
+TEST: Singleton Pattern
+============================================================
+✓ Singleton pattern working correctly
+
+============================================================
+TEST: Stock Registration
+============================================================
+Number of tickers after registration: 1
+  - BTC
+✓ Basic stock registration successful
+✓ Duplicate registration properly rejected
+Registering ETH...
+Registering AAPL...
+Number of tickers after multiple registrations: 3
+  - AAPL
+  - ETH
+  - BTC
+✓ Multiple stock registration successful
+
+============================================================
+TEST: Market Data Reads
+============================================================
+✓ Best ask: $200.00
+✓ No bids available as expected
+✓ Market depth: 1 levels
+
+============================================================
+TEST: Limit Orders
+============================================================
+✓ All 3 bid orders successfully placed (plus IPO)
+✓ Best bid: $795.00
+✓ All orders successfully placed
+✓ Best ask: $800.00
+
+============================================================
+TEST: Market Orders
+============================================================
+✓ Both limit orders successfully placed plus IPO
+✓ Market order processed
+✓ Market order executed at: $299.50
+
+============================================================
+TEST: Order Cancellation
+============================================================
+✓ Order cancellation completed
+
+============================================================
+TEST: Order Editing
+============================================================
+✓ User has 1 position (IPO may not be counted)
+✓ Initial order successfully placed plus IPO
+✓ Order edit submitted
+✓ Order successfully edited
+✓ Best bid after edit: $-1.00
+
+============================================================
+TEST: Multi-User Trading
+============================================================
+✓ All 4 user limit orders successfully placed
+✓ Single-user trading completed
+
+============================================================
+TEST: Async Processing
+============================================================
+=== Basic Async Test (50 orders) ===
+Submitted 50 orders...
+✓ Jobs are pending as expected
+✓ Processed 50 orders in 41 microseconds
+Placed count: 51, expected: 51
+✓ All orders successfully placed
+✓ All async processing tests passed
+
+============================================================
+TEST: Stress Testing & Performance
+============================================================
+=== Stress Test (10000000 orders) ===
+Note: Using runtime default capacity of 1048576 for OrderEngine (matching will free slots)
+Phase 1: Testing order placement with matching...
+✓ Submitted 10000000 orders
+✓ Submission took 1105566 microseconds
+✓ Worker synchronization took 192647 microseconds
+✓ Total time (submission + processing): 1298229 microseconds
+✓ End-to-end throughput: 7702801 orders/second
+✓ Placement results - Placed: 10000001, Open: 296000, Filled: 9704001
+✓ Matching enabled: 9704001 orders filled, capacity reused successfully
+Phase 2: Testing order cancellation...
+✓ Cancelled 0 orders in 0 microseconds (nan ops/sec)
+✓ Orders remaining open: 296000
+Phase 3: Testing order editing...
+✓ Edited 0 orders in 0 microseconds (nan ops/sec)
+✓ Final counts - Placed: 10000001, Open: 296000, Filled: 9704001, Cancelled: 0
+✓ Market depth has 1 bid levels
+✓ Memory footprint: ~11 MB
+✓ Stress test completed successfully
+
+============================================================
+TEST: Multi-Stock Concurrent Stress Test
+============================================================
+=== Multi-Stock Test (8 stocks, 10000000 orders each, 80000000 total) ===
+✓ Registered 8 stocks
+Phase 1: Testing concurrent order placement...
+✓ Submitted 80000000 orders across 8 stocks
+✓ Submission took 3089103 microseconds
+✓ Worker synchronization took 160682 microseconds
+✓ Total time (submission + processing): 3249801 microseconds
+✓ End-to-end throughput: 24616892 orders/second
+✓ Aggregate results - Placed: 80000008, Filled: 77987683, Open: 2012325
+✓ Fill rate: 97.5%
+
+Per-Stock Statistics:
+  AAPL: Placed=10000001, Filled=9387683, Open=612318
+  GOOGL: Placed=10000001, Filled=9800000, Open=200001
+  MSFT: Placed=10000001, Filled=9800000, Open=200001
+  AMZN: Placed=10000001, Filled=9800000, Open=200001
+  TSLA: Placed=10000001, Filled=9800000, Open=200001
+  META: Placed=10000001, Filled=9800000, Open=200001
+  NVDA: Placed=10000001, Filled=9800000, Open=200001
+  AMD: Placed=10000001, Filled=9800000, Open=200001
+✓ Multi-stock stress test completed successfully
+
+============================================================
+TEST: Accumulate (auto_match=off) then Drain via EngineRuntime
+============================================================
+ Submitted: 1000000 in 11 ms (90909090.9 ops/sec)
+ Drain: processed 1000001 queued orders in 36 ms (27777805.6 ops/sec)
+ Result: filled=1001, open=999000
+✓ EngineRuntime accumulate+drain test completed
+
+============================================================
+TEST: Edge Cases
+============================================================
+✓ Handled non-existent ticker gracefully
+✓ Handled invalid order values gracefully
+
+============================================================
+TEST: Notification System
+============================================================
+[RUNTIME] Starting EngineRuntime with 2 workers, capacity 10000
+=== Testing notification system with verbose=true ===
+[IPO] Order 0 accepted for NOTIFY_TEST
+✓ Stock registered with notifications enabled
+Submitting orders to generate notifications...
+[REGISTER] Registered NOTIFY_TEST with IPO: 5.000000 shares @ $100.000000 (owned by user 0)
+[LIMIT ORDER] EXCEPTION: Ticker not found: NONEXISTENT
+[LIMIT ORDER] EXCEPTION: Invalid price/qty: 0/100000
+[LIMIT ORDER] EXCEPTION: Invalid price/qty: 500000/0
+[CANCEL ORDER] ERROR: Order 99999 not found
+✓ Notification system processed all events
+✓ Check console output above for notification messages
+[UNREGISTER] Unregistered NOTIFY_TEST
+✓ Notification system test completed
+Note: Notifications are printed to console in verbose mode
+
+============================================================
+TEST: Order Fill Notification Flag
+============================================================
+[RESET] Reset complete - all stocks and orders cleared
+[RUNTIME] Starting EngineRuntime with 2 workers, capacity 10000
+[IPO] Order 0 accepted for TEST
+[REGISTER] Registered TEST with IPO: 10.000000 shares @ $100.000000 (owned by user 0)
+Order fill notifications disabled. Placing orders...
+✓ Order fill notification flag test completed
+
+============================================================
+TEST: Simulate Throughput with Binance Data
+============================================================
+[RESET] Reset complete - all stocks and orders cleared
+Starting full simulation (processing entire data file)...
+✓ Simulation started successfully
+Waiting for simulation to complete...
+
+============================================================
+SIMULATION RESULTS - BTCUSDT
+============================================================
+
+📊 Processing Metrics:
+  Market updates processed: 79691776
+  Orders placed:            33508875
+  Orders filled:            32652705
+  Orders cancelled:         0
+
+⚡ Performance Metrics:
+  Simulation time:          11.44 sec
+  Total time (w/ setup):    11.59 sec
+  Updates throughput:       6875356 updates/sec
+  Order rate:               2890956 orders/sec
+
+🔧 Engine Utilization:
+  Peak open orders:         7032050
+  Final open orders:        856170
+  Avg utilization:          23.65%
+
+📈 Market Data:
+  Initial price:            $92616.10
+  Final price:              $97494.30
+  Unique price levels:      130398
+  Cache entries:            172401
+
+💹 Trading Statistics:
+  Fill rate:                97.44%
+============================================================
+✓ Simulate throughput test completed successfully
+
+============================================================
+🎉 ALL TESTS PASSED! 🎉
+============================================================

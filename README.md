@@ -20,46 +20,70 @@ It is designed for realistic **Level‑3 (order‑by‑order)** market simulatio
 
 ### Repository Layout
 
-- `backtesting-engine/` – C++20 core:
+- `core/` – C++20 core:
   - `order_engine.cpp` – price–time priority matching engine
   - `engine_runtime.cpp` – multi‑stock runtime, job scheduling, snapshots
-  - `test/` – C++ benchmarks and correctness tests
-- `python/titan/` – Python package:
-  - `strategy.py` – base `TradingStrategy` abstraction
-  - `strategies/` – example strategies (`market_maker.py`, `momentum.py`)
-- `examples/` – end‑to‑end backtests and data utilities:
-  - `backtest_single.py`, `backtest_multi_agent.py`
-  - `backtest_from_tardis.py`, `tardis/` L2/L3 converters and replayers
-- `docs/` – user and developer documentation (API, architecture, performance, data format).
+  - `test/` – C++ benchmarks and correctness tests; sample data in `test/examples/`
+- `python/titan/` – Python package (C++ bindings via pybind11).
+- `python/tests/` – Python tests and utilities:
+  - `test_bindings.py`, `test_binance_strategy_throughput.py`, `test_stress_multiworker.py`
+  - `download_market_data.py`, `convert_l2_to_csv.py` (Tardis L2 download/convert)
+- `docs/` – documentation (installation, quickstart, API).
 
 ---
 
-### Installation (from source)
+### Installing the Python library
 
-Prerequisites:
-- Python 3.8+
-- CMake 3.15+
-- A C++20 compiler (clang++ or g++)
+Titan is a Python package with a C++ extension. Install from source as follows.
+
+**Prerequisites**
+
+- **Python** 3.8 or newer  
+- **C++20 compiler** (e.g. clang++ on macOS, g++ 10+ or clang++ 11+ on Linux)  
+- **CMake** 3.15+ (optional; only needed if you want to run the C++ test suite)
+
+**Steps**
 
 ```bash
-# Clone repository
+# 1. Clone the repository
 git clone https://github.com/Donnieboi03/Titan.git
 cd Titan
 
-# Python deps
+# 2. Install Python dependencies (pybind11, numpy, pandas, etc.)
 pip install -r requirements.txt
 
-# Build C++ core (via CMake)
-mkdir build && cd build
-cmake ..
-cmake --build . -j8
-cd ..
-
-# Install Python package in editable mode
+# 3. Install the Titan package (builds the C++ extension via setuptools)
 pip install -e .
 ```
 
-**Quick validation:** From the repo root, run C++ tests with `cd build && ctest` (after building). Once the Python extension is built, run `python examples/backtest_single.py` for a minimal end‑to‑end backtest.
+Step 3 compiles the C++ core and creates the `titan` Python package. No separate CMake build is required to use the library.
+
+**Verify installation**
+
+```bash
+python -c "import titan; print(titan.__version__)"
+# Expected: 0.1.0
+```
+
+**Run Python tests (optional)**
+
+From the repo root:
+
+```bash
+python python/tests/test_bindings.py
+```
+
+**Run C++ tests (optional)**
+
+If you want to run the C++ unit tests as well:
+
+```bash
+mkdir -p build && cd build
+cmake ..
+cmake --build . -j8
+ctest
+cd ..
+```
 
 ---
 
@@ -68,45 +92,23 @@ pip install -e .
 ```python
 import titan
 
-# Initialize runtime (8 workers, 4M order capacity per engine)
-runtime = titan.EngineRuntime(num_threads=8, capacity=4 * 1024 * 1024)
+# Initialize runtime (singleton: 8 workers, 4M order capacity)
+titan.EngineRuntime.reset_instance()
+runtime = titan.EngineRuntime.get_instance(num_threads=8, capacity=4 * 1024 * 1024)
 
 # Register a stock
-runtime.register_stock("AAPL", ipo_price=150.0, ipo_qty=1_000_000.0)
+runtime.register_stock("AAPL", 150.0, 1_000_000.0)
 
 # Submit a limit order
-runtime.submit_limit_order("AAPL", side="BID", price=149.95, qty=100.0)
+runtime.submit_limit_order("AAPL", "BID", 149.95, 100.0)
 runtime.process_pending_orders()
 
 # Query market state
 price = runtime.get_market_price("AAPL")
-depth = runtime.get_market_depth("AAPL", side="BID", depth=10)
-print(price, depth)
+print(price)
 ```
 
-#### Simple strategy example
-
-```python
-from titan.strategy import TradingStrategy
-
-class SimpleMarketMaker(TradingStrategy):
-    def __init__(self, runtime, user_id, ticker, spread_bps: float = 10.0):
-        super().__init__(runtime, user_id)
-        self.ticker = ticker
-        self.spread_bps = spread_bps
-
-    def on_market_data(self, ticker, best_bid, best_ask):
-        if best_bid is None or best_ask is None:
-            return
-
-        mid = 0.5 * (best_bid + best_ask)
-        spread = mid * (self.spread_bps / 10_000.0)
-
-        self.runtime.submit_limit_order(self.ticker, "BID", mid - spread / 2, 100.0, self.user_id)
-        self.runtime.submit_limit_order(self.ticker, "ASK", mid + spread / 2, 100.0, self.user_id)
-```
-
-More examples live in `examples/` and the docs.
+See `python/tests/test_bindings.py` for more usage and `docs/` for full API and strategy patterns.
 
 ---
 
@@ -126,32 +128,27 @@ Representative performance (depends on hardware and config):
 | Single‑stock stress test   | 100M+               |
 | Multi‑stock, 8 workers     | 10M–100M           |
 
-For deeper numbers and methodology, see `docs/performance.md` and `backtesting-engine/PERFORMANCE_REPORT.md`.
+For deeper numbers and methodology, see `core/PERFORMANCE_REPORT.md` if present.
 
 ---
 
-### Documentation & Learning More
+### Documentation
 
-- `docs/installation.md` – build and environment setup
-- `docs/quickstart.md` – step‑by‑step first backtest
-- `docs/api.md` – Python API reference
-- `docs/strategies.md` – writing custom strategies
-- `docs/multi_agent.md` – multi‑agent experiments
-- `docs/cpp_internals.md` – deep dive into the C++ core
+- [docs/README.md](docs/README.md) – documentation index
+- [docs/installation.md](docs/installation.md) – install the Python library
+- [docs/quickstart.md](docs/quickstart.md) – first backtest
+- [docs/api.md](docs/api.md) – Python API reference
 
 ---
 
 ### Testing
 
 ```bash
-# C++ tests (from repo root)
-mkdir -p build && cd build
-cmake ..
-ctest
+# Python tests (from repo root)
+python python/tests/test_bindings.py
 
-# Python tests (if present)
-cd ..
-pytest
+# Optional: C++ tests
+mkdir -p build && cd build && cmake .. && cmake --build . -j8 && ctest && cd ..
 ```
 
 ---
@@ -160,6 +157,6 @@ pytest
 
 - **License**: MIT – see `LICENSE`.
 - **Contributions**: Issues and PRs are welcome.  
-  Please read `docs/contributing.md` before opening large changes.
+  Open an issue or PR for large changes.
 
 If you use Titan in research or production and are allowed to share, consider mentioning it in your paper, blog post, or release notes.

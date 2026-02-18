@@ -1,20 +1,29 @@
 # .env files
 .env
 
-# log giles
+# Log files
 .log
 logs/
 
-# temp files
+# Temp files
 *temp*
 *tmp*
 
-# debug symbol files
+# Debug symbol files
 *.dSYM
 **/*.dSYM/
 
-# temporarly hidden
-python/
-examples/
-docs/
-.txt
+# Build / install artifacts
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+**/titan_core*.so
+**/*.so
+
+# Docs (optional; uncomment if you want docs in repo)
+# docs/
+
+# Keep .txt only if you use it for temp notes
+# .txt
