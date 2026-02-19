@@ -50,6 +50,7 @@ The Python package links against **Highway** (SIMD) and **zlib**. Install them b
 | **macOS** (Homebrew) | `brew install highway` *(zlib is usually already present; if not: `brew install zlib`)* |
 | **Linux** (Debian/Ubuntu) | `sudo apt install libhighway-dev zlib1g-dev` |
 | **Linux** (other) | Install the Highway and zlib development packages for your distro. |
+| **Windows** (vcpkg) | `vcpkg install highway` *(and `vcpkg install zlib` if needed; build with [vcpkg](https://vcpkg.io/) toolchain, e.g. set `CMAKE_TOOLCHAIN_FILE`)* |
 
 **Steps**
 

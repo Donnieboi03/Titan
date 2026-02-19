@@ -4,6 +4,7 @@ Setup script for Titan Python package.
 Build dependencies (install before pip install .):
   - macOS:   brew install highway
   - Linux:  e.g. apt install libhighway-dev zlib1g-dev
+  - Windows: vcpkg install highway (and zlib if needed); build with vcpkg toolchain
 See README.md for full prerequisites.
 """
 

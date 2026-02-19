@@ -8,6 +8,7 @@ This guide explains how to install the **Titan Python library** (C++ extension +
 - **C++ compiler** with C++20 support:  
   - **macOS**: clang++ (install Xcode Command Line Tools: `xcode-select --install`)  
   - **Linux**: g++ 10+ or clang++ 11+  
+  - **Windows**: MSVC (Visual Studio 2019 or newer with C++ desktop workload) or clang-cl  
 - **CMake**: 3.15+ (only required if you want to run the C++ test suite; not required for `pip install`)
 
 The Python dependencies (pybind11, numpy, pandas, etc.) are installed automatically when you run `pip install -r requirements.txt` and `pip install -e .`.
@@ -35,7 +36,8 @@ The C++ extension links against **Highway** (SIMD) and **zlib**. Install them be
 
 - **macOS (Homebrew):** `brew install highway` (zlib is usually present; if not: `brew install zlib`)
 - **Linux (Debian/Ubuntu):** `sudo apt install libhighway-dev zlib1g-dev`
-- **Other Linux:** Install the Highway and zlib development packages for your distro.
+- **Linux (other):** Install the Highway and zlib development packages for your distro.
+- **Windows (vcpkg):** `vcpkg install highway` (and `vcpkg install zlib` if needed). Build with the vcpkg toolchain (e.g. set `CMAKE_TOOLCHAIN_FILE` to your vcpkg toolchain file).
 
 ### 4. Install the Titan package
 
