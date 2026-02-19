@@ -10,6 +10,7 @@ backtest::runtime::EngineRuntime& backtest::runtime::EngineRuntime::get_instance
 {
     if (!instance_initialized_)
     {
+        // TODO: Remove delete here; only reset_instance() should delete. Create only when s_instance_ptr == nullptr to avoid reentrancy UB.
         delete s_instance_ptr;
         s_instance_ptr = new EngineRuntime(num_threads, default_capacity, _verbose, quantum_orders);
         instance_initialized_ = true;

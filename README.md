@@ -7,7 +7,7 @@ It is designed for realistic **Level‑2 / Level‑3 (order‑by‑order)** mark
 
 ---
 
-## 🚀 What Titan Gives You
+## 🚀 Key features
 
 - 🤝 **Multi‑agent simulation**: Run many strategies competing in the same order book.
 - 📊 **Realistic microstructure**: FIFO price–time priority, ownership validation, and exchange‑style matching.
@@ -15,6 +15,27 @@ It is designed for realistic **Level‑2 / Level‑3 (order‑by‑order)** mark
 - 🐍 **Python strategies**: Write strategies in Python; execution and matching happen in C++ via `pybind11`.
 - 📂 **L2 / L3 data replay**: Parse and replay historical feeds (`.bin`, `.csv`, `.csv.gz`) from sources like Tardis.
 - 🔁 **Deterministic experiments**: Same data + same code → identical results run‑to‑run.
+
+---
+
+## 🔧 Technical stack
+
+- **C++20** – Core matching engine and runtime (order book, scheduling, snapshots).
+- **Highway** – SIMD (SSE4/AVX2/AVX-512, NEON) for hot paths where applicable.
+- **pybind11** – Python bindings; strategies in Python, execution in C++.
+- **zlib** – Compressed market data (e.g. `.csv.gz`) support.
+- **Lock‑free concurrent design** – Per‑worker double‑buffered job queues (atomic swap, no mutex in hot path); order book snapshots use lock‑free caching for fast reads.
+- **Memory pooling** – Generational handle pool for orders: O(1) alloc/free, dense storage, no per‑order heap; capacity fixed at engine creation.
+
+---
+
+## 🏗️ Architecture
+
+- **Python layer** – Strategies (callables), `EngineRuntime` singleton, order submission and queries.
+- **EngineRuntime** – Multi‑ticker coordinator: job scheduler, worker threads, per‑ticker `OrderEngine` instances, user/order attribution and notifications.
+- **OrderEngine** (per instrument) – Price–time priority book, FIFO levels, match‑and‑fill; emits accept/fill/cancel events used for user PnL and volume.
+
+![Architecture](docs/architecture.png)
 
 ---
 
