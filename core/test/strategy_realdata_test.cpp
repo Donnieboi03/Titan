@@ -51,12 +51,12 @@ void market_maker_strategy(User* user) {
             // Only if spread is reasonable (less than 1% of mid price)
             if (spread > 0.01 && spread < (mid * 0.01)) {
                 // Buy below mid
-                if (user->submit_limit_order(ticker, OrderSide::BID, mid - (spread / 4.0), 0.001) != engine::INVALID_ID) {
+                if (user->submit_limit_order(ticker, OrderSide::BID, mid - (spread / 4.0), 0.001) != engine::INVALID_ORDER_ID) {
                     strategy_stats.orders_placed++;
                 }
                 
                 // Sell above mid  
-                if (user->submit_limit_order(ticker, OrderSide::ASK, mid + (spread / 4.0), 0.001) != engine::INVALID_ID) {
+                if (user->submit_limit_order(ticker, OrderSide::ASK, mid + (spread / 4.0), 0.001) != engine::INVALID_ORDER_ID) {
                     strategy_stats.orders_placed++;
                 }
             }
@@ -77,14 +77,14 @@ void aggressive_taker_strategy(User* user) {
         // Randomly buy or sell at market prices (more frequently)
         if (ask > 0 && strategy_stats.market_updates % 50 == 0) {
             // Buy at ask (take liquidity)
-            if (user->submit_limit_order(ticker, OrderSide::BID, ask, 0.0001) != engine::INVALID_ID) {
+            if (user->submit_limit_order(ticker, OrderSide::BID, ask, 0.0001) != engine::INVALID_ORDER_ID) {
                 strategy_stats.orders_placed++;
             }
         }
         
         if (bid > 0 && strategy_stats.market_updates % 75 == 0) {
             // Sell at bid (take liquidity)
-            if (user->submit_limit_order(ticker, OrderSide::ASK, bid, 0.0001) != engine::INVALID_ID) {
+            if (user->submit_limit_order(ticker, OrderSide::ASK, bid, 0.0001) != engine::INVALID_ORDER_ID) {
                 strategy_stats.orders_placed++;
             }
         }

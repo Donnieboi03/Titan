@@ -1,47 +1,50 @@
-#pragma once
 #include "engine_runtime.h"
 #include "market_data_parser.h"
+#include <functional>
 
-// EngineRuntime Singlton Managment Implmentation
+// File-scope pointer so both get_instance() and reset_instance() can manage lifetime.
+static backtest::runtime::EngineRuntime* s_instance_ptr = nullptr;
+
+// EngineRuntime Singleton Management Implementation
 backtest::runtime::EngineRuntime& backtest::runtime::EngineRuntime::get_instance(std::size_t num_threads, std::size_t default_capacity, bool _verbose, std::size_t quantum_orders)
 {
-    static EngineRuntime* instance_ptr = nullptr;
-    
-    if (!instance_initialized_) 
+    if (!instance_initialized_)
     {
-        if (instance_ptr != nullptr) 
-        {
-            delete instance_ptr;
-        }
-        instance_ptr = new EngineRuntime(num_threads, default_capacity, _verbose, quantum_orders);
+        delete s_instance_ptr;
+        s_instance_ptr = new EngineRuntime(num_threads, default_capacity, _verbose, quantum_orders);
         instance_initialized_ = true;
     }
-    
-    return *instance_ptr;
+
+    return *s_instance_ptr;
 }
 
 void backtest::runtime::EngineRuntime::reset_instance()
 {
-    auto& runtime = get_instance();
-    
+    if (!s_instance_ptr) return;
+
     try
     {
-        // Process Jobs and Clear Memory
-        runtime.scheduler_.process_jobs(); // Wait for pending jobs
-        runtime.engines_info_.clear(); // Clear Engines
-        runtime.ticker_to_engine_id_.clear(); // Clear ticker lookup map
-        runtime.user_orders_.clear(); // Clear User Orders
-        runtime.order_to_user_.clear(); // Clear reverse map
-        runtime.snapshot_cache_.clear(); // Clear snapshot cache
-        
-        // toggle OFF intilized flag (allowing for get_instance to create new refrence)
+        s_instance_ptr->scheduler_.process_jobs();
+        s_instance_ptr->stop_notification_thread();
+
+        // Clear all runtime state
+        s_instance_ptr->engines_info_.clear();
+        s_instance_ptr->ticker_to_engine_id_.clear();
+        s_instance_ptr->user_orders_.clear();
+        s_instance_ptr->order_to_user_.clear();
+        s_instance_ptr->snapshot_cache_.clear();
+        s_instance_ptr->users_.clear();
+
         instance_initialized_ = false;
-        
-        runtime.notify("[RESET] Reset complete - all stocks and orders cleared");
+
+        // Delete the old object so no stale references can be used after this call.
+        delete s_instance_ptr;
+        s_instance_ptr = nullptr;
     }
     catch(const std::exception& e)
     {
-        runtime.notify("[RESET] ERROR: " + std::string(e.what()));
+        // Can't notify — runtime may be partially torn down.
+        (void)e;
     }
 }
 
@@ -87,10 +90,7 @@ bool backtest::runtime::EngineRuntime::register_stock(const std::string& _ticker
 
         // Add OrderEngineInfo to engines vector
         engines_info_.emplace_back(engine_capacity, verbose_, ipo_qty_ticks, engine_id % num_workers_, engine_id);
-        // Cache ticker string on the engine info for fast reverse lookup
-        if (engine_id < engines_info_.size()) {
-            engines_info_[engine_id].ticker_ = _ticker;
-        }
+        engines_info_[engine_id].ticker_ = _ticker;
         
         // Add ticker to engine_id mapping
         ticker_to_engine_id_[_ticker] = engine_id;
@@ -110,8 +110,25 @@ bool backtest::runtime::EngineRuntime::register_stock(const std::string& _ticker
         }
         
         // Place initial sell at IPO Price and IPO Quantity (from IPO holder)
-        std::vector<engine::EngineMsg> msgs;
-        engine::OrderId ipo_order = engines_info_[engine_id].engine_->place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, ipo_price_ticks, ipo_qty_ticks, msgs);
+        engine::OrderId ipo_order;
+        if (users_.empty()) {
+            ipo_order = engines_info_[engine_id].engine_->place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, ipo_price_ticks, ipo_qty_ticks);
+        } else {
+            std::vector<engine::EngineMsg> msgs;
+            ipo_order = engines_info_[engine_id].engine_->place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, ipo_price_ticks, ipo_qty_ticks, msgs);
+            for (const auto& msg : msgs) {
+                switch (msg.kind) {
+                    case engine::EventKind::ACCEPT:
+                        notify("[IPO] Order " + std::to_string(ipo_order) + " accepted for " + _ticker);
+                        break;
+                    case engine::EventKind::REJECT:
+                        notify("[IPO] Order " + std::to_string(ipo_order) + " rejected for " + _ticker);
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
         
         // Update snapshot so IPO order is visible
         engines_info_[engine_id].engine_->update_snapshot();
@@ -126,21 +143,6 @@ bool backtest::runtime::EngineRuntime::register_stock(const std::string& _ticker
         user_orders_[backtest::user::IPO_HOLDER][engine_id].insert(ipo_order);
         // Reverse map entry for IPO
         order_to_user_[ipo_order] = backtest::user::IPO_HOLDER;
-        
-        // Process IPO messages
-        for (const auto& msg : msgs) 
-        {
-            switch (msg.kind) {
-                case engine::EventKind::ACCEPT:
-                    notify("[IPO] Order " + std::to_string(ipo_order) + " accepted for " + _ticker);
-                    break;
-                case engine::EventKind::REJECT:
-                    notify("[IPO] Order " + std::to_string(ipo_order) + " rejected for " + _ticker);
-                    break;
-                default:
-                    break;
-            }
-        }
         
         notify("[REGISTER] Registered " + _ticker + " with IPO: " + 
             std::to_string(_ipo_qty) + " shares @ $" + std::to_string(_ipo_price) + 
@@ -228,14 +230,12 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_limit_order_async_impl(
         if (ticker_it == ticker_to_engine_id_.end()) 
         {
             throw std::invalid_argument("Ticker not found: " + _ticker);
-            return engine::INVALID_ID;
         }
         
         EngineId engine_id = ticker_it->second;
         if (engine_id >= engines_info_.size()) 
         {
             throw std::runtime_error("Engine not found for ticker: " + _ticker);
-            return engine::INVALID_ID;
         }
         
         // Convert user-facing values to internal format
@@ -244,7 +244,6 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_limit_order_async_impl(
         if (price_ticks <= 0 || qty_ticks <= 0) 
         {
             throw std::runtime_error("Invalid price/qty: " + std::to_string(price_ticks) + "/" + std::to_string(qty_ticks));
-            return engine::INVALID_ID;
         }
 
         auto& engine_info = engines_info_[engine_id];
@@ -282,28 +281,27 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_limit_order_async_impl(
             }
         }
         
-        // Always collect engine messages so runtime can process fills
         engine::OrderId order_id;
-        {
+        if (runtime_ptr->users_.empty()) {
+            order_id = runtime_ptr->engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::LIMIT, price_ticks, qty_ticks);
+        } else {
             std::vector<engine::EngineMsg> msgs;
-            order_id = runtime_ptr->engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::LIMIT, price_ticks, qty_ticks, msgs);
-
+            bool collect_accept = (user_id != user::INVALID_USER_ID);
+            std::function<bool(engine::OrderId)> fill_filter_fn = [rt = runtime_ptr](engine::OrderId id) { return rt->order_to_user_.find(id) != rt->order_to_user_.end(); };
+            order_id = runtime_ptr->engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::LIMIT, price_ticks, qty_ticks, msgs, collect_accept, &fill_filter_fn);
             for (const auto& msg : msgs) {
                 runtime_ptr->notify_order_event("[LIMIT ORDER]", order_id, msg.kind);
-                
                 if (msg.kind == engine::EventKind::ACCEPT) {
                     runtime_ptr->handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, price_ticks);
                 }
-                
                 runtime_ptr->handle_fill_event(msg, engine_id);
             }
         }
         
-        // Track user order
         runtime_ptr->track_user_order(order_id, user_id, engine_id);
     
         // Increment order counter for quantum tracking
-        if (order_id != engine::INVALID_ID && user_id == user::INVALID_USER_ID) {
+        if (order_id != engine::INVALID_ORDER_ID && user_id == user::INVALID_USER_ID) {
             runtime_ptr->increment_order_counter(engine_id);
         }
 
@@ -311,13 +309,13 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_limit_order_async_impl(
     
         // Use runtime wrapper to enforce batch-size then submit
         submit_job_on_worker(engine_info.worker_id_, std::move(job));
-        return engine::INVALID_ID;  // Async path: order ID not available at return
+        return engine::INVALID_ORDER_ID;  // Async path: order ID not available at return
     } catch (const std::exception& e) {
         notify("[LIMIT ORDER] EXCEPTION: " + std::string(e.what()));
-        return engine::INVALID_ID;
+        return engine::INVALID_ORDER_ID;
     } catch (...) {
         notify("[LIMIT ORDER] EXCEPTION: Unknown error");
-        return engine::INVALID_ID;
+        return engine::INVALID_ORDER_ID;
     }
 }
 
@@ -328,13 +326,13 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_limit_order_sync_impl(c
         auto ticker_it = ticker_to_engine_id_.find(_ticker);
         if (ticker_it == ticker_to_engine_id_.end()) {
             if (verbose_) notify("[LIMIT ORDER] ERROR: Ticker not found: " + _ticker);
-            return engine::INVALID_ID;
+            return engine::INVALID_ORDER_ID;
         }
         
         EngineId engine_id = ticker_it->second;
         if (engine_id >= engines_info_.size()) {
             if (verbose_) notify("[LIMIT ORDER] ERROR: Engine not found");
-            return engine::INVALID_ID;
+            return engine::INVALID_ORDER_ID;
         }
         
         // Convert user-facing values to internal format
@@ -342,7 +340,7 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_limit_order_sync_impl(c
         engine::Quantity qty_ticks = math::qty_to_internal(_qty);
         if (price_ticks <= 0 || qty_ticks <= 0) {
             if (verbose_) notify("[LIMIT ORDER] ERROR: Invalid price/qty");
-            return engine::INVALID_ID;
+            return engine::INVALID_ORDER_ID;
         }
         
         // VALIDATE OWNERSHIP BEFORE SUBMITTING (only for registered users)
@@ -358,41 +356,40 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_limit_order_sync_impl(c
                 }
                 if (total_owned < qty_ticks) {
                     if (verbose_) notify("[LIMIT ORDER] ERROR: Insufficient shares for user " + std::to_string(user_id));
-                    return engine::INVALID_ID;
+                    return engine::INVALID_ORDER_ID;
                 }
             }
         }
         
-        // Direct engine call
         engine::OrderId order_id;
-        std::vector<engine::EngineMsg> msgs;
-        order_id = engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::LIMIT, price_ticks, qty_ticks, msgs);
-        
-        for (const auto& msg : msgs) {
-            notify_order_event("[LIMIT ORDER]", order_id, msg.kind);
-            
-            if (msg.kind == engine::EventKind::ACCEPT) {
-                handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, price_ticks);
+        if (users_.empty()) {
+            order_id = engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::LIMIT, price_ticks, qty_ticks);
+        } else {
+            std::vector<engine::EngineMsg> msgs;
+            bool collect_accept = (user_id != user::INVALID_USER_ID);
+            std::function<bool(engine::OrderId)> fill_filter_fn = [this](engine::OrderId id) { return order_to_user_.find(id) != order_to_user_.end(); };
+            order_id = engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::LIMIT, price_ticks, qty_ticks, msgs, collect_accept, &fill_filter_fn);
+            for (const auto& msg : msgs) {
+                notify_order_event("[LIMIT ORDER]", order_id, msg.kind);
+                if (msg.kind == engine::EventKind::ACCEPT) {
+                    handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, price_ticks);
+                }
+                handle_fill_event(msg, engine_id);
             }
-            
-            handle_fill_event(msg, engine_id);
         }
         
-        // Track order
         track_user_order(order_id, user_id, engine_id);
-        
-        // Increment order counter for quantum tracking
-        if (order_id != engine::INVALID_ID && user_id == user::INVALID_USER_ID) {
+        if (order_id != engine::INVALID_ORDER_ID && user_id == user::INVALID_USER_ID) {
             increment_order_counter(engine_id);
         }
         
         return order_id;
     } catch (const std::exception& e) {
         notify("[LIMIT ORDER] EXCEPTION: " + std::string(e.what()));
-        return engine::INVALID_ID;
+        return engine::INVALID_ORDER_ID;
     } catch (...) {
         notify("[LIMIT ORDER] EXCEPTION: Unknown error");
-        return engine::INVALID_ID;
+        return engine::INVALID_ORDER_ID;
     }
 }
 
@@ -409,14 +406,12 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_market_order_async_impl
         if (ticker_it == ticker_to_engine_id_.end()) 
         {
             throw std::invalid_argument("Ticker not found: " + _ticker);
-            return engine::INVALID_ID;
         }
         
         EngineId engine_id = ticker_it->second;
         if (engine_id >= engines_info_.size()) 
         {
             throw std::runtime_error("Engine not found for ticker: " + _ticker);
-            return engine::INVALID_ID;
         }
         
         // Convert user-facing quantity to internal format
@@ -424,7 +419,6 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_market_order_async_impl
         if (qty_ticks <= 0) 
         {
             throw std::runtime_error("Invalid qty:" + std::to_string(qty_ticks));
-            return engine::INVALID_ID;
         }
         
         auto& engine_info = engines_info_[engine_id];
@@ -464,37 +458,36 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_market_order_async_impl
         }
         
         engine::OrderId order_id;
-        {
+        if (runtime_ptr->users_.empty()) {
+            order_id = runtime_ptr->engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::MARKET, market_price, qty_ticks);
+        } else {
             std::vector<engine::EngineMsg> msgs;
-            order_id = runtime_ptr->engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::MARKET, market_price, qty_ticks, msgs);
+            bool collect_accept = (user_id != user::INVALID_USER_ID);
+            std::function<bool(engine::OrderId)> fill_filter_fn = [rt = runtime_ptr](engine::OrderId id) { return rt->order_to_user_.find(id) != rt->order_to_user_.end(); };
+            order_id = runtime_ptr->engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::MARKET, market_price, qty_ticks, msgs, collect_accept, &fill_filter_fn);
             for (const auto& msg : msgs) {
                 runtime_ptr->notify_order_event("[MARKET ORDER]", order_id, msg.kind);
-                
                 if (msg.kind == engine::EventKind::ACCEPT) {
                     runtime_ptr->handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, market_price);
                 }
-                
                 runtime_ptr->handle_fill_event(msg, engine_id);
             }
         }
         
-        // Track user order
         runtime_ptr->track_user_order(order_id, user_id, engine_id);
-        
-        // Increment order counter for quantum tracking
-        if (order_id != engine::INVALID_ID && user_id == user::INVALID_USER_ID) {
+        if (order_id != engine::INVALID_ORDER_ID && user_id == user::INVALID_USER_ID) {
             runtime_ptr->increment_order_counter(engine_id);
         }
     }, engine_id);
 
         submit_job_on_worker(engine_info.worker_id_, std::move(job));
-        return engine::INVALID_ID;  // Async path: order ID not available at return
+        return engine::INVALID_ORDER_ID;  // Async path: order ID not available at return
     } catch (const std::exception& e) {
         notify("[MARKET ORDER] EXCEPTION: " + std::string(e.what()));
-        return engine::INVALID_ID;
+        return engine::INVALID_ORDER_ID;
     } catch (...) {
         notify("[MARKET ORDER] EXCEPTION: Unknown error");
-        return engine::INVALID_ID;
+        return engine::INVALID_ORDER_ID;
     }
 }
 
@@ -505,20 +498,20 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_market_order_sync_impl(
         auto ticker_it = ticker_to_engine_id_.find(_ticker);
         if (ticker_it == ticker_to_engine_id_.end()) {
             if (verbose_) notify("[MARKET ORDER] ERROR: Ticker not found: " + _ticker);
-            return engine::INVALID_ID;
+            return engine::INVALID_ORDER_ID;
         }
         
         EngineId engine_id = ticker_it->second;
         if (engine_id >= engines_info_.size()) {
             if (verbose_) notify("[MARKET ORDER] ERROR: Engine not found");
-            return engine::INVALID_ID;
+            return engine::INVALID_ORDER_ID;
         }
         
         // Convert user-facing quantity to internal format
         engine::Quantity qty_ticks = math::qty_to_internal(_qty);
         if (qty_ticks <= 0) {
             if (verbose_) notify("[MARKET ORDER] ERROR: Invalid qty");
-            return engine::INVALID_ID;
+            return engine::INVALID_ORDER_ID;
         }
         
         // VALIDATE OWNERSHIP BEFORE SUBMITTING (only for registered users)
@@ -534,7 +527,7 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_market_order_sync_impl(
                 }
                 if (total_owned < qty_ticks) {
                     if (verbose_) notify("[MARKET ORDER] ERROR: Insufficient shares for user " + std::to_string(user_id));
-                    return engine::INVALID_ID;
+                    return engine::INVALID_ORDER_ID;
                 }
             }
         }
@@ -545,39 +538,38 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_market_order_sync_impl(
         
         if (market_price == static_cast<engine::Price>(-1)) {
             if (verbose_) notify("[MARKET ORDER] ERROR: No market price available");
-            return engine::INVALID_ID;
+            return engine::INVALID_ORDER_ID;
         }
         
-        // Direct engine call
         engine::OrderId order_id;
-        std::vector<engine::EngineMsg> msgs;
-        order_id = engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::MARKET, market_price, qty_ticks, msgs);
-        
-        for (const auto& msg : msgs) {
-            notify_order_event("[MARKET ORDER]", order_id, msg.kind);
-            
-            if (msg.kind == engine::EventKind::ACCEPT) {
-                handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, market_price);
+        if (users_.empty()) {
+            order_id = engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::MARKET, market_price, qty_ticks);
+        } else {
+            std::vector<engine::EngineMsg> msgs;
+            bool collect_accept = (user_id != user::INVALID_USER_ID);
+            std::function<bool(engine::OrderId)> fill_filter_fn = [this](engine::OrderId id) { return order_to_user_.find(id) != order_to_user_.end(); };
+            order_id = engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::MARKET, market_price, qty_ticks, msgs, collect_accept, &fill_filter_fn);
+            for (const auto& msg : msgs) {
+                notify_order_event("[MARKET ORDER]", order_id, msg.kind);
+                if (msg.kind == engine::EventKind::ACCEPT) {
+                    handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, market_price);
+                }
+                handle_fill_event(msg, engine_id);
             }
-            
-            handle_fill_event(msg, engine_id);
         }
         
-        // Track order
         track_user_order(order_id, user_id, engine_id);
-        
-        // Increment order counter for quantum tracking
-        if (order_id != engine::INVALID_ID && user_id == user::INVALID_USER_ID) {
+        if (order_id != engine::INVALID_ORDER_ID && user_id == user::INVALID_USER_ID) {
             increment_order_counter(engine_id);
         }
         
         return order_id;
     } catch (const std::exception& e) {
         notify("[MARKET ORDER] EXCEPTION: " + std::string(e.what()));
-        return engine::INVALID_ID;
+        return engine::INVALID_ORDER_ID;
     } catch (...) {
         notify("[MARKET ORDER] EXCEPTION: Unknown error");
-        return engine::INVALID_ID;
+        return engine::INVALID_ORDER_ID;
     }
 }
 
@@ -635,12 +627,11 @@ bool backtest::runtime::EngineRuntime::submit_cancel_order_async_impl(const std:
 
         // If cancel accepted: release any reservation for this order
         if (msg.kind == engine::EventKind::ACCEPT) {
-            if (user_id != backtest::user::INVALID_USER_ID && msg.order_id != engine::INVALID_ID) {
+            if (user_id != backtest::user::INVALID_USER_ID && msg.order_id != engine::INVALID_ORDER_ID) {
                 try {
-                    const std::string &ticker = runtime_ptr->engines_info_[engine_id].ticker_;
-                    if (!ticker.empty() && user_id != backtest::user::IPO_HOLDER) {
-                        // Note: release_reservation not in User class header - commented out
-                        // runtime_ptr->users_[user_id - 1].release_reservation(msg.order_id);
+                    const std::size_t user_idx = static_cast<std::size_t>(user_id) - 1;
+                    if (user_id != backtest::user::IPO_HOLDER && user_idx < runtime_ptr->users_.size()) {
+                        runtime_ptr->sync_order_api_.release_reservation_for_user(&runtime_ptr->users_[user_idx], order_id);
                     }
                 } catch (...) { }
             }
@@ -733,9 +724,13 @@ bool backtest::runtime::EngineRuntime::submit_cancel_order_sync_impl(const std::
         if (success && msg.kind == engine::EventKind::ACCEPT) {
             actually_cancelled = true;
         }
-        
-        // Untrack order if cancelled successfully
+
+        // Release reservation and untrack order if cancelled successfully
         if (actually_cancelled && user_id != backtest::user::INVALID_USER_ID) {
+            const std::size_t user_idx = static_cast<std::size_t>(user_id) - 1;
+            if (user_id != backtest::user::IPO_HOLDER && user_idx < users_.size()) {
+                sync_order_api_.release_reservation_for_user(&users_[user_idx], order_id);
+            }
             if (user_id < user_orders_.size() && engine_id < user_orders_[user_id].size()) {
                 user_orders_[user_id][engine_id].erase(order_id);
                 order_to_user_.erase(order_id);
@@ -847,7 +842,7 @@ bool backtest::runtime::EngineRuntime::submit_edit_order_async_impl(const std::s
                         if (!ticker.empty() && user_id != backtest::user::IPO_HOLDER) {
                             double qty = backtest::math::internal_to_qty(qty_ticks);
                             double price = backtest::math::ticks_to_dollars(price_ticks);
-                            runtime_ptr->sync_order_api_.reserve_on_accept_to_user(&runtime_ptr->users_[user_id - 1], order_id, order->side_, qty, price);
+                            runtime_ptr->sync_order_api_.reserve_on_accept_to_user(&runtime_ptr->users_[user_id - 1], ticker, order_id, order->side_, qty, price);
                         }
                     } catch (...) { }
                 }
@@ -974,7 +969,7 @@ bool backtest::runtime::EngineRuntime::submit_edit_order_sync_impl(const std::st
                         if (!ticker.empty() && user_id != backtest::user::IPO_HOLDER) {
                             double qty = backtest::math::internal_to_qty(qty_ticks);
                             double price = backtest::math::ticks_to_dollars(price_ticks);
-                            sync_order_api_.reserve_on_accept_to_user(&users_[user_id - 1], order_id, order->side_, qty, price);
+                            sync_order_api_.reserve_on_accept_to_user(&users_[user_id - 1], ticker, order_id, order->side_, qty, price);
                         }
                     } catch (...) { }
                 }
@@ -1039,7 +1034,7 @@ double backtest::runtime::EngineRuntime::get_market_price(const std::string& _ti
         // In batch mode (quantum == 0) perform a synchronous snapshot
         // update so callers observing the API get the latest state.
         if (quantum_orders_ == 0) {
-            const_cast<EngineRuntime*>(this)->update_snapshot_internal(engine_id);
+            update_snapshot_internal(engine_id);
         }
         
         const engine::MarketSnapshot* snap = get_snapshot_fast(engine_id);
@@ -1082,7 +1077,7 @@ double backtest::runtime::EngineRuntime::get_best_bid(const std::string& _ticker
         // In batch mode (quantum == 0) perform a synchronous snapshot
         // update so callers observing the API get the latest state.
         if (quantum_orders_ == 0) {
-            const_cast<EngineRuntime*>(this)->update_snapshot_internal(engine_id);
+            update_snapshot_internal(engine_id);
         }
         
         const engine::MarketSnapshot* snap = get_snapshot_fast(engine_id);
@@ -1108,7 +1103,7 @@ double backtest::runtime::EngineRuntime::get_best_ask(const std::string& _ticker
         // In batch mode (quantum == 0) perform a synchronous snapshot
         // update so callers observing the API get the latest state.
         if (quantum_orders_ == 0) {
-            const_cast<EngineRuntime*>(this)->update_snapshot_internal(engine_id);
+            update_snapshot_internal(engine_id);
         }
         
         const engine::MarketSnapshot* snap = get_snapshot_fast(engine_id);
@@ -1153,7 +1148,7 @@ std::vector<std::pair<double, double>> backtest::runtime::EngineRuntime::get_mar
         // In batch mode (quantum == 0) perform a synchronous snapshot
         // update so callers observing the API get the latest state.
         if (quantum_orders_ == 0) {
-            const_cast<EngineRuntime*>(this)->update_snapshot_internal(engine_id);
+            update_snapshot_internal(engine_id);
         }
         
         const engine::MarketSnapshot* snap = get_snapshot_fast(engine_id);
@@ -1260,7 +1255,7 @@ bool backtest::runtime::EngineRuntime::get_auto_match(const std::string& _ticker
         // In batch mode (quantum == 0) perform a synchronous snapshot
         // update so callers observing the API get the latest state.
         if (quantum_orders_ == 0) {
-            const_cast<EngineRuntime*>(this)->update_snapshot_internal(engine_id);
+            update_snapshot_internal(engine_id);
         }
 
         const engine::MarketSnapshot* snap = get_snapshot_fast(engine_id);
@@ -1394,6 +1389,7 @@ bool backtest::runtime::EngineRuntime::simulate
     engine_info.get_write_metrics().initial_price = initial_price;
     engine_info.get_write_metrics().simulation_running = true;
     engine_info.publish_metrics();
+    engine_info.get_write_metrics().simulation_running = true;
     
     // Create simulation job
     auto simulation_job = scheduler::make_job([this, parser = std::move(parser), engine_id, target_orders]() mutable {
@@ -1411,7 +1407,7 @@ bool backtest::runtime::EngineRuntime::simulate
         auto start_time = std::chrono::high_resolution_clock::now();
         
         // Queue-then-periodically-drain: orders are queued (auto_match off), then we drain every batch
-        engine->set_auto_match(false);
+        engine->set_auto_match(true);
         // Use this symbol's engine capacity for threshold and batch sizing (from OrderEngineInfo)
         std::size_t engine_capacity = engine_info.capacity_;
         std::size_t batch_size = runtime_batch_size_.load(std::memory_order_relaxed);
@@ -1441,6 +1437,8 @@ bool backtest::runtime::EngineRuntime::simulate
         };
         
         parser::L2Update update;
+        std::vector<engine::EngineMsg> msgs; // reused across iterations to avoid repeated alloc/free
+        msgs.reserve(16);
         // Main simulation loop with direct engine calls and metrics tracking
         while (parser->parse_next(update)) 
         {
@@ -1467,37 +1465,39 @@ bool backtest::runtime::EngineRuntime::simulate
                     unique_prices.insert(price_ticks);
                     engine::Quantity qty_ticks = math::qty_to_internal(std::abs(delta));
 
-                    std::vector<engine::EngineMsg> msgs; // msg buffer
                     engine::OrderId order_id;
-                    if (delta > 0.0) 
-                    {
-                        // Direct engine call - place order on the specified side
-                        order_id = engine->place_order(side, engine::OrderType::LIMIT, price_ticks, qty_ticks, msgs);
-                    } else 
-                    {
-                        // Place order on opposite side
-                        engine::OrderSide opposite = (side == engine::OrderSide::BID)
-                                                    ? engine::OrderSide::ASK : engine::OrderSide::BID;
-                        order_id = engine->place_order(opposite, engine::OrderType::LIMIT, price_ticks, qty_ticks, msgs);
+                    if (users_.empty()) {
+                        if (delta > 0.0) {
+                            order_id = engine->place_order(side, engine::OrderType::LIMIT, price_ticks, qty_ticks);
+                        } else {
+                            engine::OrderSide opposite = (side == engine::OrderSide::BID) ? engine::OrderSide::ASK : engine::OrderSide::BID;
+                            order_id = engine->place_order(opposite, engine::OrderType::LIMIT, price_ticks, qty_ticks);
+                        }
+                    } else {
+                        msgs.clear();
+                        std::function<bool(engine::OrderId)> fill_filter_fn = [this](engine::OrderId id) { return order_to_user_.find(id) != order_to_user_.end(); };
+                        if (delta > 0.0) {
+                            order_id = engine->place_order(side, engine::OrderType::LIMIT, price_ticks, qty_ticks, msgs, false, &fill_filter_fn);
+                        } else {
+                            engine::OrderSide opposite = (side == engine::OrderSide::BID) ? engine::OrderSide::ASK : engine::OrderSide::BID;
+                            order_id = engine->place_order(opposite, engine::OrderType::LIMIT, price_ticks, qty_ticks, msgs, false, &fill_filter_fn);
+                        }
+                        for (const auto& msg : msgs) {
+                            this->notify_order_event("[LIMIT ORDER]", order_id, msg.kind);
+                            this->handle_fill_event(msg, engine_id);
+                        }
                     }
-                    
-                    // Emit Order Events
-                    for (const auto& msg : msgs) {
-                        this->notify_order_event("[LIMIT ORDER]", order_id, msg.kind);
-                        this->handle_fill_event(msg, engine_id);
-                    }
-
-                    // Increment order counter for quantum tracking (simulation orders use INVALID_USER_ID)
-                    if (order_id != engine::INVALID_ID) this->increment_order_counter(engine_id);
+                    if (order_id != engine::INVALID_ORDER_ID) this->increment_order_counter(engine_id);
                 }
             }
             
             // Periodically drain queue: turn auto_match on to drain, then off again
-            if (updates % drain_interval == 0)
-            {
-                engine->set_auto_match(true);
-                engine->set_auto_match(false);
-            }
+            // if (updates % drain_interval == 0)
+            // {
+            //     engine->set_auto_match(true);
+            //     engine->set_auto_match(false);
+            // }
+
             // Process at batch intervals (metrics)
             if (batch_size > 0 && updates % batch_size == 0) 
             {
@@ -1538,7 +1538,7 @@ bool backtest::runtime::EngineRuntime::simulate
         }
         
         // Final drain: match any remaining queued orders before final metrics
-        engine->set_auto_match(true);
+        // engine->set_auto_match(true);
         // Update snapshot for final metrics capture
         engine->update_snapshot(); 
         const engine::MarketSnapshot& final_snapshot = engine->get_snapshot();
@@ -1649,7 +1649,7 @@ std::size_t backtest::runtime::EngineRuntime::get_placed_count(const std::string
         // In batch mode (quantum == 0) perform a synchronous snapshot
         // update so callers observing the API get the latest state.
         if (quantum_orders_ == 0) {
-            const_cast<EngineRuntime*>(this)->update_snapshot_internal(engine_id);
+            update_snapshot_internal(engine_id);
         }
         
         const engine::MarketSnapshot* snap = get_snapshot_fast(engine_id);
@@ -1673,7 +1673,7 @@ std::size_t backtest::runtime::EngineRuntime::get_cancelled_count(const std::str
         // In batch mode (quantum == 0) perform a synchronous snapshot
         // update so callers observing the API get the latest state.
         if (quantum_orders_ == 0) {
-            const_cast<EngineRuntime*>(this)->update_snapshot_internal(engine_id);
+            update_snapshot_internal(engine_id);
         }
         
         const engine::MarketSnapshot* snap = get_snapshot_fast(engine_id);
@@ -1697,7 +1697,7 @@ std::size_t backtest::runtime::EngineRuntime::get_filled_count(const std::string
         // In batch mode (quantum == 0) perform a synchronous snapshot
         // update so callers observing the API get the latest state.
         if (quantum_orders_ == 0) {
-            const_cast<EngineRuntime*>(this)->update_snapshot_internal(engine_id);
+            update_snapshot_internal(engine_id);
         }
         
         const engine::MarketSnapshot* snap = get_snapshot_fast(engine_id);
@@ -1721,7 +1721,7 @@ std::size_t backtest::runtime::EngineRuntime::get_open_count(const std::string& 
         // In batch mode (quantum == 0) perform a synchronous snapshot
         // update so callers observing the API get the latest state.
         if (quantum_orders_ == 0) {
-            const_cast<EngineRuntime*>(this)->update_snapshot_internal(engine_id);
+            update_snapshot_internal(engine_id);
         }
         
         const engine::MarketSnapshot* snap = get_snapshot_fast(engine_id);
@@ -1762,7 +1762,7 @@ std::size_t backtest::runtime::EngineRuntime::get_utilization(const std::string&
         
         EngineId engine_id = ticker_it->second;
         if (quantum_orders_ == 0) {
-            const_cast<EngineRuntime*>(this)->update_snapshot_internal(engine_id);
+            update_snapshot_internal(engine_id);
         }
         
         const engine::MarketSnapshot* snap = get_snapshot_fast(engine_id);
@@ -1972,35 +1972,14 @@ std::vector<engine::OrderId> backtest::runtime::EngineRuntime::user_get_active_o
 bool backtest::runtime::EngineRuntime::user_has_sufficient_shares(backtest::user::UserId user_id, const std::string& ticker, engine::Quantity qty) const
 {
     try {
-        if (user_id >= user_orders_.size()) {
-            return false;
-        }
-        
-        auto ticker_it = ticker_to_engine_id_.find(ticker);
-        if (ticker_it == ticker_to_engine_id_.end()) {
-            return false;
-        }
-        
-        EngineId engine_id = ticker_it->second;
-        if (engine_id >= user_orders_[user_id].size() || user_orders_[user_id][engine_id].empty()) {
-            return false;
-        }
-        
-        if (engine_id >= engines_info_.size()) {
-            return false;
-        }
-        
-        engine::Quantity total_owned = 0;
-        const engine::OrderEngine& engine = *engines_info_[engine_id].engine_;
-        for (engine::OrderId order_id : user_orders_[user_id][engine_id]) {
-            auto order = engine.get_order(order_id);
-            if (order != nullptr && order->side_ == engine::OrderSide::ASK && 
-                order->status_ == engine::OrderStatus::OPEN) {
-                total_owned += order->qty_;
-            }
-        }
-        
-        return total_owned >= qty;
+        const std::size_t user_idx = static_cast<std::size_t>(user_id) - 1;
+        if (user_id == user::INVALID_USER_ID || user_idx >= users_.size()) return false;
+
+        const user::User& u = users_[user_idx];
+        double net_position = u.get_position(ticker);
+        double already_committed = u.get_committed_sell_qty(ticker);
+        double available = net_position - already_committed;
+        return available >= math::internal_to_qty(qty);
     } catch (...) {
         return false;
     }
@@ -2103,7 +2082,7 @@ void backtest::runtime::EngineRuntime::notify(const std::string& message) noexce
 
 
 
-void backtest::runtime::EngineRuntime::update_snapshot_internal(EngineId engine_id) noexcept
+void backtest::runtime::EngineRuntime::update_snapshot_internal(EngineId engine_id) const noexcept
 {
     if (engine_id < engines_info_.size()) {
         engines_info_[engine_id].engine_->update_snapshot();
@@ -2211,43 +2190,50 @@ void backtest::runtime::EngineRuntime::notify_order_event(const std::string& pre
 
 void backtest::runtime::EngineRuntime::track_user_order(engine::OrderId order_id, user::UserId user_id, EngineId engine_id) noexcept
 {
-    if (order_id != engine::INVALID_ID && user_id != user::INVALID_USER_ID) {
-        user_orders_[user_id][engine_id].insert(order_id);
-        order_to_user_[order_id] = user_id;
-    }
+    if (order_id == engine::INVALID_ORDER_ID || user_id == user::INVALID_USER_ID) return;
+
+    // Grow tracking tables on demand — strategies may be registered before stocks
+    if (user_id >= user_orders_.size())
+        user_orders_.resize(user_id + 1);
+    if (engine_id >= user_orders_[user_id].size())
+        user_orders_[user_id].resize(engine_id + 1);
+
+    user_orders_[user_id][engine_id].insert(order_id);
+    order_to_user_[order_id] = user_id;
 }
 
 void backtest::runtime::EngineRuntime::handle_accept_event(engine::OrderId order_id, user::UserId user_id, EngineId engine_id, 
                                                            engine::OrderSide side, engine::Quantity qty_ticks, engine::Price price_ticks) noexcept
 {
-    if (user_id == user::INVALID_USER_ID || order_id == engine::INVALID_ID) return;
+    if (user_id == user::INVALID_USER_ID || order_id == engine::INVALID_ORDER_ID) return;
     
     try {
         const std::string &ticker = engines_info_[engine_id].ticker_;
         if (!ticker.empty() && user_id != user::IPO_HOLDER) {
             double qty = math::internal_to_qty(qty_ticks);
             double price = math::ticks_to_dollars(price_ticks);
-            sync_order_api_.reserve_on_accept_to_user(&users_[user_id - 1], order_id, side, qty, price);
+            sync_order_api_.reserve_on_accept_to_user(&users_[user_id - 1], ticker, order_id, side, qty, price);
         }
     } catch (...) { }
 }
 
 void backtest::runtime::EngineRuntime::handle_fill_event(const engine::EngineMsg& msg, EngineId engine_id) noexcept
 {
-    if ((msg.kind != engine::EventKind::FILL && msg.kind != engine::EventKind::PARTIAL_FILL) ||
-        msg.qty <= 0 || msg.price == static_cast<engine::Price>(-1)) {
-        return;
-    }
-    
+    // Fast-path: only FILL/PARTIAL_FILL with valid payload matter for attribution
+    if (msg.kind != engine::EventKind::FILL && msg.kind != engine::EventKind::PARTIAL_FILL) return;
+    if (msg.qty == 0 || msg.price == static_cast<engine::Price>(-1)) return;
+
+    // Fast-path: check user ownership before any other work —
+    // the vast majority of fills are data-stream orders (never in this map).
+    auto oit = order_to_user_.find(msg.order_id);
+    if (oit == order_to_user_.end()) return;
+
     try {
         const std::string &ticker = engines_info_[engine_id].ticker_;
         if (ticker.empty()) return;
         
         double qty = math::internal_to_qty(msg.qty);
         double price = math::ticks_to_dollars(msg.price);
-        
-        auto oit = order_to_user_.find(msg.order_id);
-        if (oit == order_to_user_.end()) return;
         
         user::UserId uid = oit->second;
         if (uid > 0 && uid < user_orders_.size() && engine_id < user_orders_[uid].size()) {
@@ -2265,27 +2251,50 @@ void backtest::runtime::EngineRuntime::handle_fill_event(const engine::EngineMsg
 
 
 
-// Non-inline User member implementations
-void backtest::user::User::reserve_on_accept(engine::OrderId order_id, engine::OrderSide side, double qty, double price)
+// Non-inline User member implementations (order_slot_idx is in engine_runtime.h)
+void backtest::user::User::reserve_on_accept(const std::string& ticker, engine::OrderId order_id, engine::OrderSide side, double qty, double price)
 {
+    const std::size_t idx = backtest::runtime::order_slot_idx(order_id);
     // Ensure reservation vectors are large enough
-    if (order_id >= reserved_cash_.size()) {
-        std::size_t new_size = order_id + 1;
+    if (idx >= reserved_cash_.size()) {
+        std::size_t new_size = idx + 1;
         reserved_cash_.resize(new_size, 0.0);
         reserved_qty_.resize(new_size, 0.0);
         reserve_side_.resize(new_size, engine::OrderSide::BID);
+        reserved_ticker_.resize(new_size, "");
     }
-    
+
+    reserve_side_[idx]    = side;
+    reserved_ticker_[idx] = ticker;
+
     // Reserve funds/shares based on order side
     if (side == engine::OrderSide::BID) {
-        // Buy order: reserve cash
-        reserved_cash_[order_id] = qty * price;
+        reserved_cash_[idx] = qty * price;
         capital_ -= qty * price;
     } else {
-        // Sell order: reserve shares (qty)
-        reserved_qty_[order_id] = qty;
+        reserved_qty_[idx] = qty;
+        committed_sell_qty_[ticker] += qty;
     }
-    reserve_side_[order_id] = side;
+}
+
+void backtest::user::User::release_reservation(engine::OrderId order_id)
+{
+    const std::size_t idx = backtest::runtime::order_slot_idx(order_id);
+    if (idx >= reserved_cash_.size()) return;
+
+    if (reserve_side_[idx] == engine::OrderSide::BID) {
+        capital_ += reserved_cash_[idx];
+        reserved_cash_[idx] = 0.0;
+    } else {
+        const std::string& ticker = reserved_ticker_[idx];
+        auto it = committed_sell_qty_.find(ticker);
+        if (it != committed_sell_qty_.end()) {
+            it->second -= reserved_qty_[idx];
+            if (it->second < 0.0) it->second = 0.0;
+        }
+        reserved_qty_[idx] = 0.0;
+    }
+    reserved_ticker_[idx] = "";
 }
 
 void backtest::user::User::apply_fill(const std::string& ticker, engine::OrderId order_id, engine::OrderSide side, double qty, double price)
@@ -2293,61 +2302,73 @@ void backtest::user::User::apply_fill(const std::string& ticker, engine::OrderId
     // Update position first
     double signed_qty = (side == engine::OrderSide::BID) ? qty : -qty;
     update_position(ticker, signed_qty, price);
-    
+
+    const std::size_t idx = backtest::runtime::order_slot_idx(order_id);
     // Release reservation for filled portion
-    if (order_id < reserved_cash_.size()) {
+    if (idx < reserved_cash_.size()) {
         if (side == engine::OrderSide::BID) {
-            // Buy: cash was reserved, now we've used it
             double filled_cost = qty * price;
-            reserved_cash_[order_id] -= filled_cost;
-            if (reserved_cash_[order_id] < 0.0) reserved_cash_[order_id] = 0.0;
+            reserved_cash_[idx] -= filled_cost;
+            if (reserved_cash_[idx] < 0.0) reserved_cash_[idx] = 0.0;
         } else {
-            // Sell: shares were reserved, now we've sold them and get cash
-            reserved_qty_[order_id] -= qty;
-            if (reserved_qty_[order_id] < 0.0) reserved_qty_[order_id] = 0.0;
-            capital_ += qty * price;  // Add sale proceeds
+            reserved_qty_[idx] -= qty;
+            if (reserved_qty_[idx] < 0.0) reserved_qty_[idx] = 0.0;
+            capital_ += qty * price;
+
+            // Decrement O(1) committed sell counter
+            auto it = committed_sell_qty_.find(ticker);
+            if (it != committed_sell_qty_.end()) {
+                it->second -= qty;
+                if (it->second < 0.0) it->second = 0.0;
+            }
         }
     }
 }
 
-// ===== UserSyncOrderAPI IMPLEMENTATIONS =====
+// ===== UserAPI IMPLEMENTATIONS =====
 
-engine::OrderId backtest::runtime::UserSyncOrderAPI::submit_limit_order(const std::string& ticker, engine::OrderSide side, double price, double qty, user::UserId user_id)
+engine::OrderId backtest::runtime::UserAPI::submit_limit_order(const std::string& ticker, engine::OrderSide side, double price, double qty, user::UserId user_id)
 {
-    return runtime_ ? runtime_->submit_limit_order_sync_impl(ticker, side, price, qty, user_id) : engine::INVALID_ID;
+    return runtime_ ? runtime_->submit_limit_order_sync_impl(ticker, side, price, qty, user_id) : engine::INVALID_ORDER_ID;
 }
 
-engine::OrderId backtest::runtime::UserSyncOrderAPI::submit_market_order(const std::string& ticker, engine::OrderSide side, double qty, user::UserId user_id)
+engine::OrderId backtest::runtime::UserAPI::submit_market_order(const std::string& ticker, engine::OrderSide side, double qty, user::UserId user_id)
 {
-    return runtime_ ? runtime_->submit_market_order_sync_impl(ticker, side, qty, user_id) : engine::INVALID_ID;
+    return runtime_ ? runtime_->submit_market_order_sync_impl(ticker, side, qty, user_id) : engine::INVALID_ORDER_ID;
 }
 
-bool backtest::runtime::UserSyncOrderAPI::submit_cancel_order(const std::string& ticker, engine::OrderId order_id, user::UserId user_id)
+bool backtest::runtime::UserAPI::submit_cancel_order(const std::string& ticker, engine::OrderId order_id, user::UserId user_id)
 {
     return runtime_ ? runtime_->submit_cancel_order_sync_impl(ticker, order_id, user_id) : false;
 }
 
-bool backtest::runtime::UserSyncOrderAPI::submit_edit_order(const std::string& ticker, engine::OrderId order_id, double new_price, double new_qty, user::UserId user_id)
+bool backtest::runtime::UserAPI::submit_edit_order(const std::string& ticker, engine::OrderId order_id, double new_price, double new_qty, user::UserId user_id)
 {
     return runtime_ ? runtime_->submit_edit_order_sync_impl(ticker, order_id, new_price, new_qty, user_id) : false;
 }
 
-void backtest::runtime::UserSyncOrderAPI::apply_fill_to_user(user::User* u, const std::string& ticker, engine::OrderId order_id, engine::OrderSide side, double qty, double price)
+void backtest::runtime::UserAPI::apply_fill_to_user(user::User* u, const std::string& ticker, engine::OrderId order_id, engine::OrderSide side, double qty, double price)
 {
     if (u) u->apply_fill(ticker, order_id, side, qty, price);
 }
 
-void backtest::runtime::UserSyncOrderAPI::reserve_on_accept_to_user(user::User* u, engine::OrderId order_id, engine::OrderSide side, double qty, double price)
+void backtest::runtime::UserAPI::reserve_on_accept_to_user(user::User* u, const std::string& ticker, engine::OrderId order_id, engine::OrderSide side, double qty, double price)
 {
-    if (u) u->reserve_on_accept(order_id, side, qty, price);
+    if (u) u->reserve_on_accept(ticker, order_id, side, qty, price);
 }
 
-void backtest::runtime::UserSyncOrderAPI::setup_user_reservations(user::User* u, std::size_t reserve_size)
+void backtest::runtime::UserAPI::release_reservation_for_user(user::User* u, engine::OrderId order_id)
+{
+    if (u) u->release_reservation(order_id);
+}
+
+void backtest::runtime::UserAPI::setup_user_reservations(user::User* u, std::size_t reserve_size)
 {
     if (!u) return;
     u->reserved_cash_.assign(reserve_size, 0.0);
     u->reserved_qty_.assign(reserve_size, 0.0);
     u->reserve_side_.assign(reserve_size, engine::OrderSide::BID);
+    u->reserved_ticker_.assign(reserve_size, "");
 }
 
 // ===== USER CLASS METHOD IMPLEMENTATIONS =====
@@ -2355,13 +2376,13 @@ void backtest::runtime::UserSyncOrderAPI::setup_user_reservations(user::User* u,
 engine::OrderId backtest::user::User::submit_limit_order(const std::string& ticker, engine::OrderSide side, double price, double quantity)
 {
     if (sync_order_api_) return sync_order_api_->submit_limit_order(ticker, side, price, quantity, user_id_);
-    return engine::INVALID_ID;
+    return engine::INVALID_ORDER_ID;
 }
 
 engine::OrderId backtest::user::User::submit_market_order(const std::string& ticker, engine::OrderSide side, double quantity)
 {
     if (sync_order_api_) return sync_order_api_->submit_market_order(ticker, side, quantity, user_id_);
-    return engine::INVALID_ID;
+    return engine::INVALID_ORDER_ID;
 }
 
 bool backtest::user::User::submit_cancel_order(const std::string& ticker, engine::OrderId order_id)

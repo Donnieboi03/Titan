@@ -27,8 +27,10 @@ runtime = titan.EngineRuntime.get_instance(
 
 - `num_threads`: Number of worker threads (default: 1)
 - `capacity`: Maximum orders per order book (default: 1M)
-- `verbose`: Enable debug logging (default: False)
+- `verbose`: Enable debug logging (default: False). Set to `True` if you want order accept/fill/cancel messages.
 - `quantum`: Scheduling quantum (default: 1000)
+
+**Order notifications:** To see accept/fill/cancel messages, use `verbose=True` and call `runtime.set_notify_order(True)`. Notifications are only emitted when at least one strategy is registered (so register a strategy before placing orders if you want to see them).
 
 ### Step 3: Register a stock
 

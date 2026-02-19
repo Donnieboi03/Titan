@@ -65,7 +65,7 @@ int main(int argc, char** argv)
         if (strat % 3 == 1) {
             if (exm_ask > 0) {
                 engine::OrderId ok = u->submit_limit_order("EXM", engine::OrderSide::BID, exm_ask, 1.0);
-                if (ok != engine::INVALID_ID) std::cout << "[strategy] user " << id << " placed limit BUY EXM @ " << exm_ask << "\n";
+                if (ok != engine::INVALID_ORDER_ID) std::cout << "[strategy] user " << id << " placed limit BUY EXM @ " << exm_ask << "\n";
             }
         } else if (strat % 3 == 2) {
             auto pos = u->get_positions("EXM");
@@ -73,13 +73,13 @@ int main(int argc, char** argv)
                 // Try to take profit with a slightly higher ask
                 double sell_price = exm_bid + 0.02;
                 engine::OrderId ok = u->submit_limit_order("EXM", engine::OrderSide::ASK, sell_price, 1.0);
-                if (ok != engine::INVALID_ID) std::cout << "[strategy] user " << id << " placed limit SELL EXM @ " << sell_price << "\n";
+                if (ok != engine::INVALID_ORDER_ID) std::cout << "[strategy] user " << id << " placed limit SELL EXM @ " << sell_price << "\n";
             }
         } else {
             // Opportunistic market buy on ACME if there's available ask
             if (acme_ask > 0) {
                 engine::OrderId ok = u->submit_market_order("ACME", engine::OrderSide::BID, 0.5);
-                if (ok != engine::INVALID_ID) std::cout << "[strategy] user " << id << " submitted MARKET BUY ACME @ " << acme_ask << "\n";
+                if (ok != engine::INVALID_ORDER_ID) std::cout << "[strategy] user " << id << " submitted MARKET BUY ACME @ " << acme_ask << "\n";
             }
         }
     };

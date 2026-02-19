@@ -29,7 +29,15 @@ pip install -r requirements.txt
 
 This installs pybind11, numpy, pandas, and optional tools (e.g. tardis-dev for market data).
 
-### 3. Install the Titan package
+### 3. Install system libraries (Highway, zlib)
+
+The C++ extension links against **Highway** (SIMD) and **zlib**. Install them before building:
+
+- **macOS (Homebrew):** `brew install highway` (zlib is usually present; if not: `brew install zlib`)
+- **Linux (Debian/Ubuntu):** `sudo apt install libhighway-dev zlib1g-dev`
+- **Other Linux:** Install the Highway and zlib development packages for your distro.
+
+### 4. Install the Titan package
 
 ```bash
 pip install -e .
@@ -37,21 +45,19 @@ pip install -e .
 
 This builds the C++ extension (order engine, runtime, market data parser) and installs the `titan` package in editable mode. No separate CMake step is needed to use the library.
 
-To install without editable mode (fixed install):
+To install without editable mode (fixed install): `pip install .`
 
-```bash
-pip install .
-```
-
-### 4. Verify installation
+### 5. Verify installation
 
 ```bash
 python -c "import titan; print(titan.__version__)"
 ```
 
-You should see `0.1.0` (or the current version).
+You should see `2.1.0` (or the current version).
 
 ### One-liner (from repo root)
+
+After installing system libraries (step 3), run:
 
 ```bash
 pip install -r requirements.txt && pip install -e .

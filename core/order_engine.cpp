@@ -1,4 +1,3 @@
-#pragma once
 #include "order_engine.h"
 
 
@@ -21,13 +20,19 @@ verbose_(verbose), auto_match_(auto_match), last_trade_price_(-1), active_snapsh
 // POST: Place Order (price in ticks) - returns all messages in vector
 engine::OrderId engine::OrderEngine::place_order(OrderSide side, OrderType type, Price price, Quantity qty, std::vector<EngineMsg>& msgs) noexcept
 {
-    return place_order_impl(side, type, price, qty, &msgs);
+    return place_order_impl(side, type, price, qty, &msgs, true, nullptr);
 }
 
-// POST: Place Order (price in ticks) - overload without msgs 
+// POST: Place Order (price in ticks) - overload without msgs
 engine::OrderId engine::OrderEngine::place_order(OrderSide side, OrderType type, Price price, Quantity qty) noexcept
 {
-    return place_order_impl(side, type, price, qty, nullptr);
+    return place_order_impl(side, type, price, qty, nullptr, true, nullptr);
+}
+
+// POST: Place Order with optional accept/fill filtering (for runtime when users need reserves/fills only)
+engine::OrderId engine::OrderEngine::place_order(OrderSide side, OrderType type, Price price, Quantity qty, std::vector<EngineMsg>& msgs, bool collect_accept, const std::function<bool(OrderId)>* fill_filter) noexcept
+{
+    return place_order_impl(side, type, price, qty, &msgs, collect_accept, fill_filter);
 }
 
 // POST: Cancel Order
@@ -101,7 +106,7 @@ void engine::OrderEngine::set_auto_match(bool auto_match, std::vector<EngineMsg>
             order.in_book_ = true;
             push_into_book(order.side_, order.price_, order.time_, internal_id);
             // Simulate matching for this now-pushed order; pass id + pointer; msgs for fill/event emitting
-            matching_engine(internal_id, &order, msgs);
+            matching_engine(internal_id, &order, msgs, nullptr);
         }
         // Publish snapshot reflecting new auto_match state after draining
         //update_snapshot_impl();
@@ -133,17 +138,15 @@ void engine::OrderEngine::update_snapshot() noexcept
 // GET: Get Order (returns nullptr if invalid/freed)
 const engine::OrderInfo* engine::OrderEngine::get_order(engine::OrderId id) const noexcept { return order_pool_.get(decode_external(id)); }
 
-engine::OrderId engine::OrderEngine::place_order_impl(OrderSide side, OrderType type, Price price, Quantity qty, std::vector<EngineMsg>* msgs) noexcept
+engine::OrderId engine::OrderEngine::place_order_impl(OrderSide side, OrderType type, Price price, Quantity qty, std::vector<EngineMsg>* msgs, bool collect_accept, const std::function<bool(OrderId)>* fill_filter) noexcept
 {
     // Allocate slot and get generational handle
     const engine::OrderId internal_id = order_pool_.emplace(side, type, qty, price);
-    if (internal_id == INVALID_ID)
+    if (internal_id == INVALID_ORDER_ID)
     {
-        if (verbose_ && msgs)
-        {
+        if (msgs)
             msgs->emplace_back(EventKind::REJECT, RejectReason::ENGINE_FULL);
-        }
-        return INVALID_ID;  // Memory Pool full
+        return INVALID_ORDER_ID;  // Memory Pool full
     }
 
     // Place New Order
@@ -170,11 +173,9 @@ engine::OrderId engine::OrderEngine::place_order_impl(OrderSide side, OrderType 
             const bool no_liquidity = (side == OrderSide::ASK) ? bid_book_.empty() : ask_book_.empty();
             if (no_liquidity)
             {
-                if (verbose_ && msgs)
-                {
+                if (msgs)
                     msgs->emplace_back(EventKind::REJECT, RejectReason::NO_MARKET_LIQUIDITY);
-                }
-                return INVALID_ID;
+                return INVALID_ORDER_ID;
             }
             new_order.price_ = (side == OrderSide::ASK) ? bid_book_.peek() : ask_book_.peek();
         }
@@ -186,13 +187,13 @@ engine::OrderId engine::OrderEngine::place_order_impl(OrderSide side, OrderType 
 
     // external id has engine prefix
     const engine::OrderId id = encode_external(engine_id_, internal_id);
-    if (verbose_ && msgs)
+    if (msgs && collect_accept)
     {
         msgs->emplace_back(EventKind::ACCEPT, id);
     }
 
     // Only run matching when the order was placed in the book. When auto_match is off the order is only queued; matching happens in set_auto_match drain.
-    if (auto_match_) matching_engine(internal_id, &order_pool_[internal_id], msgs);
+    if (auto_match_) matching_engine(internal_id, &order_pool_[internal_id], msgs, fill_filter);
     return id; // Return external Order ID (engine-prefixed)
 }
 
@@ -203,7 +204,7 @@ bool engine::OrderEngine::cancel_order_impl(engine::OrderId id, EngineMsg* msg) 
     // O(1) validation via generation check
     if (!order_pool_.is_valid(internal_id))
     {
-        if (verbose_ && msg)
+        if (msg)
         {
             msg->kind = EventKind::REJECT;
             msg->reject = RejectReason::ORDER_NOT_FOUND;
@@ -218,21 +219,23 @@ bool engine::OrderEngine::cancel_order_impl(engine::OrderId id, EngineMsg* msg) 
         pop_from_book(order.side_, order.price_, order.time_, internal_id);
     }
 
-    // Set status before freeing
+    // Capture fields before freeing the slot
+    const Price     snap_price = order.price_;
+    const Quantity  snap_qty   = order.qty_;
+    const OrderSide snap_side  = order.side_;
+
     order.status_ = OrderStatus::CANCELLED;
     // Free slot (increments generation, invalidating old handles)
     order_pool_.free(internal_id);
     cancelled_count_ += 1;
 
-
-    // Notify before freeing
-    if (verbose_ && msg)
+    if (msg)
     {
         msg->kind = EventKind::ACCEPT;
         msg->order_id = encode_external(engine_id_, internal_id);
-        msg->price = order.price_;
-        msg->qty = order.qty_;
-        msg->side = order.side_;
+        msg->price = snap_price;
+        msg->qty   = snap_qty;
+        msg->side  = snap_side;
     }
 
     return true; // Order successfully canceled
@@ -245,10 +248,8 @@ bool engine::OrderEngine::edit_order_impl(engine::OrderId id, OrderSide side, Pr
     // O(1) validation via generation check
     if (!order_pool_.is_valid(internal_id))
     {
-        if (verbose_ && msgs)
-        {
+        if (msgs)
             msgs->emplace_back(EventKind::REJECT, RejectReason::ORDER_NOT_FOUND);
-        }
         return false; // Order does not exist
     }
 
@@ -284,7 +285,7 @@ bool engine::OrderEngine::edit_order_impl(engine::OrderId id, OrderSide side, Pr
     }
 
     // external id has engine prefix
-    if (verbose_ && msgs)
+    if (msgs)
     {
         msgs->emplace_back(EventKind::MODIFY, encode_external(engine_id_, internal_id));
     }

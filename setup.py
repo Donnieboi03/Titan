@@ -1,5 +1,10 @@
 """
 Setup script for Titan Python package.
+
+Build dependencies (install before pip install .):
+  - macOS:   brew install highway
+  - Linux:  e.g. apt install libhighway-dev zlib1g-dev
+See README.md for full prerequisites.
 """
 
 from setuptools import setup, Extension, find_packages
@@ -61,7 +66,7 @@ except FileNotFoundError:
 
 setup(
     name="titan-backtesting",
-    version="0.1.0",
+    version="2.1.0",
     author="Titan Contributors",
     description="Multi-agent market microstructure backtesting engine",
     long_description=long_description,

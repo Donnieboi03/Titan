@@ -12,6 +12,7 @@
 #include <random>
 #include <chrono>
 #include <algorithm>
+#include <functional>
 
 namespace engine
 {
@@ -26,6 +27,7 @@ namespace engine
         // Place / edit / cancel
         OrderId place_order(OrderSide side, OrderType type, Price price, Quantity qty, std::vector<EngineMsg>& msgs) noexcept;
         OrderId place_order(OrderSide side, OrderType type, Price price, Quantity qty) noexcept;
+        OrderId place_order(OrderSide side, OrderType type, Price price, Quantity qty, std::vector<EngineMsg>& msgs, bool collect_accept, const std::function<bool(OrderId)>* fill_filter) noexcept;
         bool cancel_order(OrderId id, EngineMsg& msg) noexcept;
         bool cancel_order(OrderId id) noexcept;
         bool edit_order(OrderId id, OrderSide side, Price price, Quantity qty, std::vector<EngineMsg>& msgs) noexcept;
@@ -61,15 +63,8 @@ namespace engine
             return external_id & INTERNAL_HANDLE_MASK;
         }
 
-        // Extract the engine id prefix from an external engine::OrderId
-        static inline std::uint16_t extract_engine_id(engine::OrderId external_id) noexcept 
-        {
-            if (external_id == OrderMemoryPool::INVALID_HANDLE) return static_cast<std::uint16_t>(-1);
-            return static_cast<std::uint16_t>((external_id & ENGINE_ID_MASK) >> ENGINE_ID_SHIFT);
-        }
-
         // Private implementation methods
-        OrderId place_order_impl(OrderSide side, OrderType type, Price price, Quantity qty, std::vector<EngineMsg>* msgs) noexcept;
+        OrderId place_order_impl(OrderSide side, OrderType type, Price price, Quantity qty, std::vector<EngineMsg>* msgs, bool collect_accept = true, const std::function<bool(OrderId)>* fill_filter = nullptr) noexcept;
         bool cancel_order_impl(OrderId id, EngineMsg* msg) noexcept;
         bool edit_order_impl(OrderId id, OrderSide side, Price price, Quantity qty, std::vector<EngineMsg>* msgs) noexcept;
         void update_snapshot_impl() noexcept;
@@ -104,8 +99,8 @@ namespace engine
         // Inline hot path functions for performance
         inline void push_into_book(OrderSide side, Price price, Timestamp time, OrderId id) noexcept;
         inline void pop_from_book(OrderSide side, Price price, Timestamp time, OrderId id) noexcept;
-        inline void matching_engine(OrderId recent_internal_id, OrderInfo* recent_order_ptr, std::vector<EngineMsg>* fill_notifications) noexcept;
-        inline void matching(OrderId best_ask_id, OrderId best_bid_id, OrderLevel& best_ask_level, OrderLevel& best_bid_level, std::vector<EngineMsg>* fill_notifications) noexcept;
+        inline void matching_engine(OrderId recent_internal_id, OrderInfo* recent_order_ptr, std::vector<EngineMsg>* fill_notifications, const std::function<bool(OrderId)>* fill_filter = nullptr) noexcept;
+        inline void matching(OrderId best_ask_id, OrderId best_bid_id, OrderLevel& best_ask_level, OrderLevel& best_bid_level, std::vector<EngineMsg>* fill_notifications, const std::function<bool(OrderId)>* fill_filter = nullptr) noexcept;
     };
 
     // Inline implementations (must be in header)
@@ -234,7 +229,7 @@ namespace engine
         }
     }
 
-    inline void OrderEngine::matching_engine(OrderId recent_internal_id, OrderInfo* recent_order_ptr, std::vector<EngineMsg>* fill_notifications) noexcept
+    inline void OrderEngine::matching_engine(OrderId recent_internal_id, OrderInfo* recent_order_ptr, std::vector<EngineMsg>* fill_notifications, const std::function<bool(OrderId)>* fill_filter) noexcept
     {
         if (recent_internal_id == OrderMemoryPool::INVALID_HANDLE) return;
         if (!order_pool_.is_valid(recent_internal_id)) return;
@@ -281,13 +276,13 @@ namespace engine
             const OrderId best_ask_id = best_ask_level.peek().second;
             const OrderId best_bid_id = best_bid_level.peek().second;
 
-            matching(best_ask_id, best_bid_id, best_ask_level, best_bid_level, fill_notifications);
+            matching(best_ask_id, best_bid_id, best_ask_level, best_bid_level, fill_notifications, fill_filter);
             recent = nullptr;
         }
     }
 
     inline void OrderEngine::matching(OrderId best_ask_id, OrderId best_bid_id, OrderLevel& best_ask_level,
-                OrderLevel& best_bid_level, std::vector<EngineMsg>* fill_notifications) noexcept
+                OrderLevel& best_bid_level, std::vector<EngineMsg>* fill_notifications, const std::function<bool(OrderId)>* fill_filter) noexcept
     {   
         OrderInfo& best_ask = order_pool_[best_ask_id];
         OrderInfo& best_bid = order_pool_[best_bid_id];
@@ -317,17 +312,21 @@ namespace engine
             }
 
             best_ask.status_ = OrderStatus::FILLED;
-            if (verbose_ && fill_notifications)
+            if (fill_notifications)
             {
-                fill_notifications->emplace_back(EventKind::FILL, encode_external(engine_id_, best_ask_id), best_ask.price_, qty_filled, OrderSide::ASK);
+                const OrderId ext_ask_id = encode_external(engine_id_, best_ask_id);
+                if (!fill_filter || (*fill_filter)(ext_ask_id))
+                    fill_notifications->emplace_back(EventKind::FILL, ext_ask_id, best_ask.price_, qty_filled, OrderSide::ASK);
             }
 
             order_pool_.free(best_ask_id);
             filled_count_ += 1;
         }
-        else if (verbose_ && fill_notifications)
+        else if (fill_notifications)
         {
-            fill_notifications->emplace_back(EventKind::PARTIAL_FILL, encode_external(engine_id_, best_ask_id));
+            const OrderId ext_ask_id = encode_external(engine_id_, best_ask_id);
+            if (!fill_filter || (*fill_filter)(ext_ask_id))
+                fill_notifications->emplace_back(EventKind::PARTIAL_FILL, ext_ask_id);
         }
         
         if (bid_filled)
@@ -342,17 +341,21 @@ namespace engine
             }
 
             best_bid.status_ = OrderStatus::FILLED;
-            if (verbose_ && fill_notifications)
+            if (fill_notifications)
             {
-                fill_notifications->emplace_back(EventKind::FILL, encode_external(engine_id_, best_bid_id), best_bid.price_, qty_filled, OrderSide::BID);
+                const OrderId ext_bid_id = encode_external(engine_id_, best_bid_id);
+                if (!fill_filter || (*fill_filter)(ext_bid_id))
+                    fill_notifications->emplace_back(EventKind::FILL, ext_bid_id, best_bid.price_, qty_filled, OrderSide::BID);
             }
 
             order_pool_.free(best_bid_id);
             filled_count_ += 1;
         }
-        else if (verbose_ && fill_notifications)
+        else if (fill_notifications)
         {
-            fill_notifications->emplace_back(EventKind::PARTIAL_FILL, encode_external(engine_id_, best_bid_id));
+            const OrderId ext_bid_id = encode_external(engine_id_, best_bid_id);
+            if (!fill_filter || (*fill_filter)(ext_bid_id))
+                fill_notifications->emplace_back(EventKind::PARTIAL_FILL, ext_bid_id);
         }
     }
 }

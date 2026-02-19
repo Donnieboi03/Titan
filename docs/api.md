@@ -8,20 +8,29 @@ Complete reference for Titan's Python API.
 
 Central coordinator for all market activity.
 
-#### Constructor
+#### get_instance()
+
+Get the singleton runtime (create or reuse). Call `reset_instance()` first to reinitialize.
 
 ```python
-EngineRuntime(num_threads=4, capacity=1048576, verbose=False)
+EngineRuntime.get_instance(
+    num_threads=4,
+    capacity=1048576,
+    verbose=False,
+    quantum=1000
+) -> EngineRuntime
 ```
 
 **Parameters:**
 - `num_threads` (int): Number of worker threads. Default: 4
 - `capacity` (int): Maximum orders per engine. Default: 1M (1048576)
-- `verbose` (bool): Enable debug logging. Default: False
+- `verbose` (bool): Enable notification/logging (e.g. order accept/fill/cancel). Default: False
+- `quantum` (int): Scheduling quantum in orders. Default: 1000
 
 **Example:**
 ```python
-runtime = titan.EngineRuntime(num_threads=8, capacity=2*1024*1024)
+titan.EngineRuntime.reset_instance()
+runtime = titan.EngineRuntime.get_instance(num_threads=8, capacity=2*1024*1024, verbose=True)
 ```
 
 ---
@@ -73,7 +82,7 @@ submit_limit_order(
 - `user_id` (int, optional): User identifier. Default: `INVALID_USER_ID` (untracked)
 
 **Returns:**
-- `int`: Order ID, or `INVALID_ID` if rejected
+- `int`: Order ID, or `INVALID_ORDER_ID` if rejected
 
 **Notes:**
 - Order ID is globally unique
@@ -107,7 +116,7 @@ submit_market_order(
 - `user_id` (int, optional): User identifier
 
 **Returns:**
-- `int`: Order ID, or `INVALID_ID` if rejected
+- `int`: Order ID, or `INVALID_ORDER_ID` if rejected
 
 **Notes:**
 - Executes at best available price
@@ -196,6 +205,60 @@ process_pending_orders() -> None
 runtime.submit_limit_order("AAPL", "BID", 149.50, 100.0)
 runtime.submit_limit_order("MSFT", "BID", 299.50, 50.0)
 runtime.process_pending_orders()  # Execute both
+```
+
+---
+
+#### process_pending_orders_async()
+
+Process pending orders asynchronously (non-blocking). Optional overload to process a single ticker.
+
+```python
+process_pending_orders_async() -> None
+process_pending_orders_async(ticker: str) -> None
+```
+
+**Parameters:**
+- `ticker` (str, optional): If provided, process only orders for this ticker.
+
+---
+
+#### set_notify_order() / get_notify_order()
+
+Enable or query order-fill notifications (accept/fill/partial fill/cancel). Only has effect when the runtime was created with `verbose=True`.
+
+```python
+set_notify_order(enable: bool) -> None
+get_notify_order() -> bool
+```
+
+---
+
+#### get_order()
+
+Look up an order by ticker and order ID.
+
+```python
+get_order(ticker: str, order_id: int) -> Optional[OrderInfo]
+```
+
+**Returns:** `OrderInfo` if the order exists and is valid, else `None`.
+
+**Example:**
+```python
+info = runtime.get_order("AAPL", order_id)
+if info is not None:
+    print(info)  # e.g. <OrderInfo BID LIMIT $149.50 x 100.0 [OPEN]>
+```
+
+---
+
+#### unregister_strategy()
+
+Remove a registered strategy (user) by user ID.
+
+```python
+unregister_strategy(user_id: int) -> None
 ```
 
 ---
@@ -468,13 +531,39 @@ class MyStrategy(TradingStrategy):
 
 ```python
 INVALID_USER_ID: int  # -1 (uint32_t max)
-INVALID_ID: int       # -1 (uint64_t max)
+INVALID_ORDER_ID: int       # Invalid/rejected order ID (uint64_t max)
 IPO_HOLDER: int       # 0
 ```
 
 ---
 
 ## Enumerations
+
+### EventKind
+
+Order/engine event type (used in notifications and reject reasons).
+
+```python
+class EventKind(Enum):
+    NONE = 0
+    ACCEPT = 1
+    REJECT = 2
+    MODIFY = 3
+    PARTIAL_FILL = 4
+    FILL = 5
+    CANCEL = 6
+```
+
+### RejectReason
+
+Reason for order rejection.
+
+```python
+class RejectReason(Enum):
+    NO_MARKET_LIQUIDITY = 0
+    ENGINE_FULL = 1
+    ORDER_NOT_FOUND = 2
+```
 
 ### EventType
 
@@ -501,6 +590,14 @@ class OrderSide(Enum):
     BID = 0  # Buy order
     ASK = 1  # Sell order
 ```
+
+---
+
+### OrderInfo
+
+Returned by `get_order(ticker, order_id)`. Read-only view of an order.
+
+**Attributes:** `side`, `type`, `status`, `time`, plus `get_price_dollars()`, `get_qty()`. Has a readable `__repr__` (e.g. `<OrderInfo BID LIMIT $149.50 x 100.0 [OPEN]>`).
 
 ---
 

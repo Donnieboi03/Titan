@@ -602,7 +602,7 @@ void test_accumulate_drain_runtime()
         double price = 100.0 + static_cast<double>(i % 10);
         double qty = 1.0;
         engine::OrderId oid = runtime.submit_limit_order(ticker, engine::OrderSide::BID, price, qty);
-        if (oid != engine::INVALID_ID) submitted++;
+        if (oid != engine::INVALID_ORDER_ID) submitted++;
     }
     auto submit_end = std::chrono::high_resolution_clock::now();
     auto submit_ms = std::chrono::duration_cast<std::chrono::milliseconds>(submit_end - submit_start).count();

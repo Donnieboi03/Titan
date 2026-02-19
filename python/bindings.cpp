@@ -29,8 +29,25 @@ PYBIND11_MODULE(titan_core, m) {
     // --- Constants ---
     m.attr("INVALID_USER_ID") = py::int_(user::INVALID_USER_ID);
     m.attr("IPO_HOLDER") = py::int_(user::IPO_HOLDER);
+    m.attr("INVALID_ORDER_ID") = py::int_(engine::INVALID_ORDER_ID);
 
     // --- Enums ---
+    py::enum_<engine::EventKind>(m, "EventKind")
+        .value("NONE",         engine::EventKind::NONE)
+        .value("ACCEPT",       engine::EventKind::ACCEPT)
+        .value("REJECT",       engine::EventKind::REJECT)
+        .value("MODIFY",       engine::EventKind::MODIFY)
+        .value("PARTIAL_FILL", engine::EventKind::PARTIAL_FILL)
+        .value("FILL",         engine::EventKind::FILL)
+        .value("CANCEL",       engine::EventKind::CANCEL)
+        .export_values();
+
+    py::enum_<engine::RejectReason>(m, "RejectReason")
+        .value("NO_MARKET_LIQUIDITY", engine::RejectReason::NO_MARKET_LIQUIDITY)
+        .value("ENGINE_FULL",         engine::RejectReason::ENGINE_FULL)
+        .value("ORDER_NOT_FOUND",     engine::RejectReason::ORDER_NOT_FOUND)
+        .export_values();
+
     py::enum_<engine::OrderSide>(m, "OrderSide")
         .value("BID", engine::OrderSide::BID)
         .value("ASK", engine::OrderSide::ASK)
@@ -54,11 +71,27 @@ PYBIND11_MODULE(titan_core, m) {
         .def_readonly("side", &engine::OrderInfo::side_)
         .def_readonly("type", &engine::OrderInfo::type_)
         .def_readonly("status", &engine::OrderInfo::status_)
+        .def_readonly("time", &engine::OrderInfo::time_)
         .def("get_price_dollars", [](const engine::OrderInfo& self) {
             return backtest::math::ticks_to_dollars(self.price_);
         })
         .def("get_qty", [](const engine::OrderInfo& self) {
             return backtest::math::internal_to_qty(self.qty_);
+        })
+        .def("__repr__", [](const engine::OrderInfo& self) {
+            std::string side = (self.side_ == engine::OrderSide::BID) ? "BID" : "ASK";
+            std::string type = (self.type_ == engine::OrderType::LIMIT) ? "LIMIT" : "MARKET";
+            std::string status;
+            switch (self.status_) {
+                case engine::OrderStatus::OPEN:      status = "OPEN"; break;
+                case engine::OrderStatus::FILLED:    status = "FILLED"; break;
+                case engine::OrderStatus::CANCELLED: status = "CANCELLED"; break;
+                default:                             status = "NONE"; break;
+            }
+            return "<OrderInfo " + side + " " + type + " $" +
+                   std::to_string(backtest::math::ticks_to_dollars(self.price_)) +
+                   " x " + std::to_string(backtest::math::internal_to_qty(self.qty_)) +
+                   " [" + status + "]>";
         });
 
     // --- User class ---
@@ -187,6 +220,10 @@ PYBIND11_MODULE(titan_core, m) {
         .def("process_pending_orders_async",
              py::overload_cast<>(&runtime::EngineRuntime::process_pending_orders_async),
              py::call_guard<py::gil_scoped_release>())
+        .def("process_pending_orders_async",
+             py::overload_cast<const std::string&>(&runtime::EngineRuntime::process_pending_orders_async),
+             py::arg("ticker"),
+             py::call_guard<py::gil_scoped_release>())
         // Simulation (internal parser loop)
         .def("simulate", &runtime::EngineRuntime::simulate,
              py::arg("filepath"), py::arg("ticker"),
@@ -205,6 +242,8 @@ PYBIND11_MODULE(titan_core, m) {
         .def("set_batch_size", &runtime::EngineRuntime::set_batch_size, py::arg("batch_size"))
         .def("get_batch_size", &runtime::EngineRuntime::get_batch_size)
         .def("get_quantum", &runtime::EngineRuntime::get_quantum)
+        .def("set_notify_order", &runtime::EngineRuntime::set_notify_order, py::arg("enable"))
+        .def("get_notify_order", &runtime::EngineRuntime::get_notify_order)
         
         // Statistics
         .def("get_placed_count", &runtime::EngineRuntime::get_placed_count, py::arg("ticker"))
@@ -212,6 +251,16 @@ PYBIND11_MODULE(titan_core, m) {
         .def("get_filled_count", &runtime::EngineRuntime::get_filled_count, py::arg("ticker"))
         .def("get_open_count", &runtime::EngineRuntime::get_open_count, py::arg("ticker"))
         
+        // Market data queries (additional)
+        .def("get_order",
+             [](runtime::EngineRuntime& self, const std::string& ticker, engine::OrderId order_id)
+             -> py::object {
+                 const engine::OrderInfo* info = self.get_order(ticker, order_id);
+                 if (!info) return py::none();
+                 return py::cast(info, py::return_value_policy::reference);
+             },
+             py::arg("ticker"), py::arg("order_id"))
+
         // Diagnostics
         .def("get_capacity", &runtime::EngineRuntime::get_capacity, py::arg("ticker"))
         .def("get_utilization", &runtime::EngineRuntime::get_utilization, py::arg("ticker"))
@@ -219,6 +268,10 @@ PYBIND11_MODULE(titan_core, m) {
         .def("order_exists", &runtime::EngineRuntime::order_exists,
              py::arg("ticker"), py::arg("order_id"))
         
+        // Strategy management
+        .def("unregister_strategy", &runtime::EngineRuntime::unregister_strategy,
+             py::arg("user_id"))
+
         // Strategy registration
         .def("register_strategy",
              [](runtime::EngineRuntime& self, py::function py_strategy, double starting_capital) 

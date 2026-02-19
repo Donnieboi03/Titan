@@ -18,6 +18,7 @@ build/
 dist/
 *.egg
 *.egg-info/
+__pycache__/
 .eggs/
 **/titan_core*.so
 **/*.so
@@ -31,3 +32,6 @@ dist/
 # Market data example files (too large for git — use download_market_data.py to populate)
 core/test/examples/*.bin
 core/test/examples/*.csv.gz
+
+# Sandbox (local experiments — not tracked)
+sandbox/

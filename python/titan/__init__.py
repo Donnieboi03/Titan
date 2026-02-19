@@ -5,7 +5,7 @@ A high-performance Python library (C++ core) for backtesting algorithmic
 trading strategies against historical Level-2 order book data.
 """
 
-__version__ = "0.1.0"
+__version__ = "2.1.0"
 
 # Import C++ extension module (will be built by pybind11)
 try:
@@ -17,9 +17,12 @@ try:
         OrderSide,
         OrderStatus,
         OrderType,
+        EventKind,
+        RejectReason,
         SimulationMetrics,
         INVALID_USER_ID,
         IPO_HOLDER,
+        INVALID_ORDER_ID,
     )
 except ImportError as e:
     import sys
@@ -47,6 +50,9 @@ __all__ = [
     "OrderSide",
     "OrderStatus",
     "OrderType",
+    "EventKind",
+    "RejectReason",
     "INVALID_USER_ID",
     "IPO_HOLDER",
+    "INVALID_ORDER_ID",
 ]

@@ -23,15 +23,15 @@ namespace backtest
         // 1.00 USD is 10,000 ticks -> 0.01 USD (1 cent) is 100 ticks
         constexpr double PRICE_TICK = 10000.0;
         inline engine::Price dollars_to_ticks(double dollars) { return static_cast<engine::Price>(std::round(dollars * PRICE_TICK)); }
-        inline double ticks_to_dollars(engine::Price ticks) { return static_cast<double>(ticks) / PRICE_TICK; }
+        constexpr inline double ticks_to_dollars(engine::Price ticks) { return static_cast<double>(ticks) / PRICE_TICK; }
 
         // 1 BTC is 100,000 ticks -> 0.00001 BTC (~$1.00) is 1 tick
         constexpr uint32_t QTY_TICK = 100000;
         inline engine::Quantity qty_to_internal(double value) { return static_cast<engine::Quantity>(std::round(value * QTY_TICK)); }
-        inline double internal_to_qty(engine::Quantity internal_val) { return static_cast<double>(internal_val) / QTY_TICK; }
+        constexpr inline double internal_to_qty(engine::Quantity internal_val) { return static_cast<double>(internal_val) / QTY_TICK; }
 
         // Thresholds updated to match the 10,000 ticks-per-dollar scale
-        inline engine::Quantity get_QTY_TICK(engine::Price price_in_ticks)
+        constexpr inline engine::Quantity get_QTY_TICK(engine::Price price_in_ticks)
         {
             // $1.00 threshold     (1.00 * 10,000 = 10,000 ticks)
             // $100.00 threshold   (100.00 * 10,000 = 1,000,000 ticks)

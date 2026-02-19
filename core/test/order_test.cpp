@@ -1,3 +1,4 @@
+#include "../engine_runtime_types.h"
 #include "../order_engine.cpp"
 #include <iostream>
 #include <cassert>
@@ -8,40 +9,11 @@
 #include <cstdlib>
 #include <ctime>
 
-namespace math
-{
-    // 1.00 USD is 10,000 ticks -> 0.01 USD (1 cent) is 100 ticks
-    constexpr double PRICE_TICK = 10000.0; 
-    inline engine::Price dollars_to_ticks(double dollars) { return static_cast<engine::Price>(std::round(dollars * PRICE_TICK)); }
-    inline double ticks_to_dollars(engine::Price ticks) { return static_cast<double>(ticks) / PRICE_TICK; }
-
-    // 1 BTC is 100,000 ticks -> 0.00001 BTC (~&1.00) is 1 tick
-    constexpr uint32_t QTY_TICK = 100000;
-    inline engine::Quantity qty_to_internal(double value) { return static_cast<engine::Quantity>(std::round(value * QTY_TICK)); }
-    inline double internal_to_qty(engine::Quantity internal_val) { return static_cast<double>(internal_val) / QTY_TICK; }
-
-    // Thresholds updated to match the 10,000 ticks-per-dollar scale
-    inline engine::Quantity get_QTY_TICK(engine::Price price_in_ticks) 
-    {
-        // $1.00 threshold     (1.00 * 10,000 = 10,000 ticks)
-        // $100.00 threshold   (100.00 * 10,000 = 1,000,000 ticks)
-        // $10,000.00 threshold (10,000.00 * 10,000 = 100,000,000 ticks)
-    
-        if (price_in_ticks <= 10000)         return QTY_TICK;       // Under $1: Whole units only
-        if (price_in_ticks <= 1000000)       return QTY_TICK / 100; // Under $100: 2 decimals (0.01)
-        if (price_in_ticks <= 100000000)     return QTY_TICK / 1000; // Under $10k: 3 decimals (0.001)
-    
-        // Default for BTC prices ($100k+): 5 decimals (0.00001)
-        // Smallest trade is 1 internal unit (~$1.00 value at $100k BTC)
-        return 1; 
-    }
-}
-
 // Global verbose flag
 bool VERBOSE = false;
 
-// Helper: convert dollars to ticks for test inputs
-inline engine::Price price(double dollars) { return dollars * 100; }
+// Helper: convert dollars to ticks for test inputs (uses backtest::math scale)
+inline engine::Price price(double dollars) { return backtest::math::dollars_to_ticks(dollars); }
 
 // Test the new notification system
 void test_new_notification_system()
@@ -133,18 +105,18 @@ void test_place_limit_order()
     auto bid2 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(99.0), 20);
     auto bid3 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(98.0), 15);
 
-    assert(bid1 != engine::INVALID_ID && "Bid order 1 should be placed");
-    assert(bid2 != engine::INVALID_ID && "Bid order 2 should be placed");
-    assert(bid3 != engine::INVALID_ID && "Bid order 3 should be placed");
+    assert(bid1 != engine::INVALID_ORDER_ID && "Bid order 1 should be placed");
+    assert(bid2 != engine::INVALID_ORDER_ID && "Bid order 2 should be placed");
+    assert(bid3 != engine::INVALID_ORDER_ID && "Bid order 3 should be placed");
 
     // Place ask orders
     auto ask1 = engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(101.0), 10);
     auto ask2 = engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(102.0), 20);
     auto ask3 = engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(103.0), 15);
     
-    assert(ask1 != engine::INVALID_ID && "Ask order 1 should be placed");
-    assert(ask2 != engine::INVALID_ID && "Ask order 2 should be placed");
-    assert(ask3 != engine::INVALID_ID && "Ask order 3 should be placed");
+    assert(ask1 != engine::INVALID_ORDER_ID && "Ask order 1 should be placed");
+    assert(ask2 != engine::INVALID_ORDER_ID && "Ask order 2 should be placed");
+    assert(ask3 != engine::INVALID_ORDER_ID && "Ask order 3 should be placed");
     
     // Verify orders exist
     const engine::OrderInfo* bid_order = engine.get_order(bid1);
@@ -181,14 +153,14 @@ void test_place_market_order()
     
     // Try to place market order with no liquidity
     auto market_bid = engine.place_order(engine::OrderSide::BID, engine::OrderType::MARKET, 0, 10);
-    assert(market_bid == engine::INVALID_ID && "Market order should fail without liquidity");
+    assert(market_bid == engine::INVALID_ORDER_ID && "Market order should fail without liquidity");
     
     // Place limit orders first
     engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, price(200.0), 10);
     engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(199.0), 10);
     // Now place market orders
     auto market_bid2 = engine.place_order(engine::OrderSide::BID, engine::OrderType::MARKET, 0, 5);
-    assert(market_bid2 != engine::INVALID_ID && "Market order should succeed with liquidity");
+    assert(market_bid2 != engine::INVALID_ORDER_ID && "Market order should succeed with liquidity");
     
     std::cout << "✓ Place Market Order test PASSED!\n\n";
 }
@@ -399,7 +371,7 @@ void test_stress_orders()
             engine::Price p = (i % 2 == 0) ? 9900 + (i % 50) : 10100 + (i % 50);
             engine::OrderSide side = (i % 2 == 0) ? engine::OrderSide::BID : engine::OrderSide::ASK;
             auto id = engine.place_order(side, engine::OrderType::LIMIT, p, 10);
-            if (id != engine::INVALID_ID) order_ids.push_back(id);
+            if (id != engine::INVALID_ORDER_ID) order_ids.push_back(id);
         }
         
         // Cancel half
@@ -643,9 +615,9 @@ void test_capacity_limits()
             engine::Price bid_price = 10000 - (i % s.price_spread);
             engine::Price ask_price = 10000 + (i % s.price_spread);
             
-            if (engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, bid_price, 10) == engine::INVALID_ID)
+            if (engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, bid_price, 10) == engine::INVALID_ORDER_ID)
                 rejected++;
-            if (engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, ask_price, 10) == engine::INVALID_ID)
+            if (engine.place_order(engine::OrderSide::ASK, engine::OrderType::LIMIT, ask_price, 10) == engine::INVALID_ORDER_ID)
                 rejected++;
             
             engine.update_snapshot();
@@ -848,9 +820,9 @@ void test_realtime_order_book_display()
         std::cout << "                    BTC-USD Order Book                     \n";
         std::cout << "═══════════════════════════════════════════════════════════\n";
         std::cout << "  Market Price: $" << std::fixed << std::setprecision(2) 
-                  << (snap.market_price != static_cast<engine::Price>(-1) ? math::ticks_to_dollars(snap.market_price) : 0.0) << "\n";
+                  << (snap.market_price != static_cast<engine::Price>(-1) ? backtest::math::ticks_to_dollars(snap.market_price) : 0.0) << "\n";
         std::cout << "  Spread: $" << (snap.best_ask != static_cast<engine::Price>(-1) && snap.best_bid != static_cast<engine::Price>(-1) 
-                  ? math::ticks_to_dollars(snap.best_ask - snap.best_bid) : 0.0) << "\n";
+                  ? backtest::math::ticks_to_dollars(snap.best_ask - snap.best_bid) : 0.0) << "\n";
         std::cout << "═══════════════════════════════════════════════════════════\n\n";
         
         // Display asks (top to bottom, highest to lowest)
@@ -858,8 +830,8 @@ void test_realtime_order_book_display()
         std::cout << "  ───────────────────────────────────────────────────────\n";
         for (int i = snap.ask_levels - 1; i >= 0; --i)
         {
-            double price_dollars = math::ticks_to_dollars(snap.ask_prices[i]);
-            double qty = math::internal_to_qty(snap.ask_depth[i]);
+            double price_dollars = backtest::math::ticks_to_dollars(snap.ask_prices[i]);
+            double qty = backtest::math::internal_to_qty(snap.ask_depth[i]);
             double total = price_dollars * qty;
             
             std::cout << "  " << std::setw(12) << std::fixed << std::setprecision(2) << price_dollars 
@@ -871,7 +843,7 @@ void test_realtime_order_book_display()
         std::cout << "  ───────────────────────────────────────────────────────\n";
         if (snap.best_ask != static_cast<engine::Price>(-1) && snap.best_bid != static_cast<engine::Price>(-1))
         {
-            double spread = math::ticks_to_dollars(snap.best_ask - snap.best_bid);
+            double spread = backtest::math::ticks_to_dollars(snap.best_ask - snap.best_bid);
             std::cout << "  " << std::setw(20) << "SPREAD: $" << std::setprecision(2) << spread << "\n";
         }
         std::cout << "  ───────────────────────────────────────────────────────\n";
@@ -881,8 +853,8 @@ void test_realtime_order_book_display()
         std::cout << "  ───────────────────────────────────────────────────────\n";
         for (int i = 0; i < snap.bid_levels; ++i)
         {
-            double price_dollars = math::ticks_to_dollars(snap.bid_prices[i]);
-            double qty = math::internal_to_qty(snap.bid_depth[i]);
+            double price_dollars = backtest::math::ticks_to_dollars(snap.bid_prices[i]);
+            double qty = backtest::math::internal_to_qty(snap.bid_depth[i]);
             double total = price_dollars * qty;
             
             std::cout << "  " << std::setw(12) << std::fixed << std::setprecision(2) << price_dollars 

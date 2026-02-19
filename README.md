@@ -42,6 +42,15 @@ Titan is a Python package with a C++ extension. Install from source as follows.
 - ⚙️ **C++20 compiler** (e.g. clang++ on macOS, g++ 10+ or clang++ 11+ on Linux)  
 - 📦 **CMake** 3.15+ (optional; only needed if you want to run the C++ test suite)
 
+**System libraries (for the C++ extension)**  
+The Python package links against **Highway** (SIMD) and **zlib**. Install them before `pip install .`:
+
+| Platform | Command |
+|----------|--------|
+| **macOS** (Homebrew) | `brew install highway` *(zlib is usually already present; if not: `brew install zlib`)* |
+| **Linux** (Debian/Ubuntu) | `sudo apt install libhighway-dev zlib1g-dev` |
+| **Linux** (other) | Install the Highway and zlib development packages for your distro. |
+
 **Steps**
 
 ```bash
@@ -62,7 +71,7 @@ Step 3 compiles the C++ core and creates the `titan` Python package. No separate
 
 ```bash
 python -c "import titan; print(titan.__version__)"
-# Expected: 0.1.0
+# Expected: 2.1.0
 ```
 
 **🧪 Run Python tests (optional)**

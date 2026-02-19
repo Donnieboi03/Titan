@@ -115,7 +115,7 @@ void test_user_wrapper_methods() {
     
     // Test order submission (should succeed - buying from IPO)
     OrderId buy_oid = trader->submit_limit_order("SOL", OrderSide::BID, 200.0, 1.0);
-    assert(buy_oid != INVALID_ID && "Buy order submission failed");
+    assert(buy_oid != INVALID_ORDER_ID && "Buy order submission failed");
     runtime.process_pending_orders();
     
     // Check if order filled
@@ -157,7 +157,7 @@ void test_position_tracking() {
     // Test selling (submit sell; may be accepted or rejected depending on engine validation)
     if (!aapl_positions.empty()) {
         OrderId sell_oid = trader->submit_limit_order("AAPL", OrderSide::ASK, 185.0, 1.0);
-        if (sell_oid != INVALID_ID) {
+        if (sell_oid != INVALID_ORDER_ID) {
             std::cout << "✓ Sell order submitted successfully" << std::endl;
         } else {
             std::cout << "✓ Sell order submitted (rejected by engine - validation ok)" << std::endl;
@@ -259,12 +259,12 @@ void test_error_handling() {
     OrderId result = trader->submit_limit_order("NVDA", OrderSide::ASK, 510.0, 5.0);
     runtime.process_pending_orders();
     
-    std::cout << "✓ Sell without shares result: " << (result != INVALID_ID ? "submitted" : "rejected") << std::endl;
+    std::cout << "✓ Sell without shares result: " << (result != INVALID_ORDER_ID ? "submitted" : "rejected") << std::endl;
     
     // Try invalid ticker
     result = trader->submit_limit_order("INVALID", OrderSide::BID, 100.0, 1.0);
-    std::cout << "✓ Invalid ticker result: " << (result != INVALID_ID ? "submitted" : "rejected") << std::endl;
-    assert(result == INVALID_ID && "Invalid ticker should be rejected");
+    std::cout << "✓ Invalid ticker result: " << (result != INVALID_ORDER_ID ? "submitted" : "rejected") << std::endl;
+    assert(result == INVALID_ORDER_ID && "Invalid ticker should be rejected");
     
     // Try to access non-existent position
     auto positions = trader->get_positions("NVDA");

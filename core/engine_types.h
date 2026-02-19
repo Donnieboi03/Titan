@@ -63,7 +63,7 @@ namespace engine
     using OrderMemoryPool = MemoryPool<OrderInfo>;
     using OrderId = OrderMemoryPool::Handle;  // Generational handle: [48-bit slot | 16-bit generation]
     using ExternalOrderId = OrderId;  // User-facing order ID (same type; alias for API clarity)
-    constexpr OrderId INVALID_ID = OrderMemoryPool::INVALID_HANDLE;
+    constexpr OrderId INVALID_ORDER_ID = OrderMemoryPool::INVALID_HANDLE;
 
     // Intrusive linked list node for FIFO order queues (O(1) operations)
     struct OrderNode {
@@ -222,7 +222,7 @@ namespace engine
     {
         EventKind kind = EventKind::NONE;
         // Common payload for most events
-        OrderId order_id = INVALID_ID;
+        OrderId order_id = INVALID_ORDER_ID;
         Price price = static_cast<Price>(-1);
         Quantity qty = 0;
         OrderSide side = OrderSide::BID;
