@@ -1,6 +1,6 @@
 # Titan Backtesting Engine - Performance Report
 
-**Generated:** February 17, 2026  
+**Last updated:** February 2026  
 **Platform:** macOS (Apple Silicon M1/M2)  
 **Compiler:** clang++ with -O3 optimization  
 **C++ Standard:** C++20
@@ -71,7 +71,7 @@ The Titan backtesting engine demonstrates exceptional performance across all thr
 - **Parallel Efficiency:** 84.7% (3.39/4.0)
 
 ### Key Characteristics
-- Lock-free MPSC queue design
+- Lock-free, per-worker double-buffered job queues (atomic swap, no mutex in hot path)
 - Round-robin worker distribution
 - Near-linear scaling up to thread count
 - **Async multi-batch outperforms sync** for throughput (after false sharing fixes)
@@ -145,7 +145,7 @@ The Titan backtesting engine demonstrates exceptional performance across all thr
 
 2. **JobScheduler:** Minimal overhead
    - Scales to 84.7% efficiency at 4 threads
-   - MPSC queue eliminates worker contention
+   - Per-worker double-buffer design eliminates lock contention
    - Async multi-batch optimal for throughput (after false sharing fixes)
    - Not the bottleneck in production workloads
 
@@ -201,7 +201,7 @@ Total RAM = num_stocks × capacity × 32 bytes
 ```
 
 ### Throughput vs Fill Rate
-- **High matching (97.6% fill):** 388M orders/sec
+- **High matching (97–98% fill):** ~7.8M orders/sec (single stock), ~27.7M orders/sec (8 stocks, 8 workers)
 - **Slot reuse critical:** Matching frees capacity
 - **No matching:** Throughput limited by capacity exhaustion
 
@@ -292,10 +292,12 @@ Total RAM = num_stocks × capacity × 32 bytes
 
 ### Optimal Configuration
 ```cpp
+EngineRuntime::reset_instance();  // if reinitializing
 auto& runtime = EngineRuntime::get_instance(
-    8,          // workers: maximum throughput with false sharing fixed
-    1048576,    // capacity: 1M orders per engine  
-    false       // verbose: disable for production
+    8,          // num_threads: workers for maximum throughput (false sharing fixed)
+    1048576,    // capacity: 1M orders per engine
+    false,      // verbose: disable for production
+    1000        // quantum: scheduling quantum (optional, default 1000)
 );
 
 // Register 8+ stocks (round-robin distribution)
@@ -311,11 +313,11 @@ for (const auto& ticker : tickers) {
 - **Latency**: ~128 μs per order (end-to-end)
 
 ### For Further Development
-1. **Reduce Notifcation Contention:** Use a Sleep Lock for Notification Thread
-1. **Fix Up Auto Matching Toggle:** Integrate Lazy Queue Keep State of Pending Orders
-3. **Consider SIMD:** Vectorize matching logic
-4. **Add telemetry:** Real-time performance monitoring
-5. **Benchmark on Intel:** Verify cross-architecture performance
+1. **Reduce notification contention:** e.g. sleep lock for notification thread
+2. **Auto-match toggle:** integrate lazy queue / pending order state as needed
+3. **Consider SIMD:** vectorize matching logic (Highway is available in stack)
+4. **Add telemetry:** real-time performance monitoring
+5. **Benchmark on Intel/AMD:** verify cross-architecture performance
 
 ---
 

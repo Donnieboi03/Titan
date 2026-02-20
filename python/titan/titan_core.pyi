@@ -76,8 +76,10 @@ class RejectReason(enum.Enum):
 
 class OrderInfo:
     """
-    Immutable snapshot of an order.
+    Immutable snapshot of an order (copy returned by get_order / get_order_info).
     
+    Safe to hold after process_pending_orders() or other engine steps; the value
+    is a copy, not a reference to internal engine state.
     Raw ``price`` and ``qty`` are in internal engine ticks.
     Use ``get_price_dollars()`` / ``get_qty()`` for human-readable units.
     """
@@ -141,17 +143,23 @@ class User:
     """
 
     # --- Order submission ---
-    def submit_limit_order(self, ticker: str, side: str, price: float, quantity: float) -> int:
+    def submit_limit_order(
+        self, ticker: str, side: Union[str, OrderSide], price: float, quantity: float
+    ) -> int:
         """Place a limit order. Returns order_id or INVALID_ORDER_ID on failure."""
         ...
-    def submit_market_order(self, ticker: str, side: str, quantity: float) -> int:
+    def submit_market_order(
+        self, ticker: str, side: Union[str, OrderSide], quantity: float
+    ) -> int:
         """Place a market order. Returns order_id or INVALID_ORDER_ID on failure."""
         ...
     def submit_cancel_order(self, ticker: str, order_id: int) -> bool:
-        """Cancel an existing order. Returns True on success."""
+        """Cancel an existing order. Returns True if accepted, False on failure."""
         ...
-    def submit_edit_order(self, ticker: str, order_id: int, new_price: float, new_quantity: float) -> bool:
-        """Edit price and/or quantity of an open order. Returns True on success."""
+    def submit_edit_order(
+        self, ticker: str, order_id: int, new_price: float, new_quantity: float
+    ) -> bool:
+        """Edit price and/or quantity of an open order. Returns True if accepted, False on failure."""
         ...
 
     # --- Market data ---
@@ -164,7 +172,9 @@ class User:
     def get_market_price(self, ticker: str) -> float:
         """Return last trade execution price in dollars."""
         ...
-    def get_market_depth(self, ticker: str, side: str, depth: int = 10) -> List[Tuple[float, float]]:
+    def get_market_depth(
+        self, ticker: str, side: Union[str, OrderSide], depth: int = 10
+    ) -> List[Tuple[float, float]]:
         """Return top-N price levels as list of (price_dollars, qty) tuples."""
         ...
     def list_tickers(self) -> List[str]:
@@ -185,7 +195,7 @@ class User:
         """Return net positions for all tickers as {ticker: qty}."""
         ...
     def get_order_info(self, ticker: str, order_id: int) -> Optional[OrderInfo]:
-        """Return order snapshot or None if not found / already freed."""
+        """Return a copy of the order snapshot, or None if not found / already freed. Safe to hold."""
         ...
     def has_sufficient_shares(self, ticker: str, qty: float) -> bool:
         """Return True if user holds at least qty shares of ticker (for sell validation)."""
@@ -275,7 +285,7 @@ class EngineRuntime:
     def submit_limit_order(
         self,
         ticker: str,
-        side: str,
+        side: Union[str, OrderSide],
         price: float,
         qty: float,
         user_id: int = ...,
@@ -286,7 +296,7 @@ class EngineRuntime:
     def submit_market_order(
         self,
         ticker: str,
-        side: str,
+        side: Union[str, OrderSide],
         qty: float,
         user_id: int = ...,
     ) -> int:
@@ -299,7 +309,7 @@ class EngineRuntime:
         order_id: int,
         user_id: int = ...,
     ) -> bool:
-        """Cancel an order asynchronously. Returns True if accepted into the queue."""
+        """Cancel an order asynchronously. Returns True if accepted into the queue, False on failure."""
         ...
 
     def submit_edit_order(
@@ -310,7 +320,7 @@ class EngineRuntime:
         new_qty: float,
         user_id: int = ...,
     ) -> bool:
-        """Edit an order asynchronously. Returns True if accepted into the queue."""
+        """Edit an order asynchronously. Returns True if accepted into the queue, False on failure."""
         ...
 
     # --- Market data queries ---
@@ -326,7 +336,7 @@ class EngineRuntime:
     def get_market_depth(
         self,
         ticker: str,
-        side: str,
+        side: Union[str, OrderSide],
         depth: int = 10,
     ) -> List[Tuple[float, float]]:
         """Return top-N depth levels as list of (price_dollars, qty) tuples."""
@@ -336,8 +346,8 @@ class EngineRuntime:
         ...
     def get_order(self, ticker: str, order_id: int) -> Optional[OrderInfo]:
         """
-        Look up an order directly by ID. Returns OrderInfo snapshot or None if
-        the order does not exist or has already been freed (filled/cancelled).
+        Look up an order by ID. Returns a copy of OrderInfo or None if the order
+        does not exist or has been freed. Safe to hold after process_pending_orders().
         """
         ...
 
@@ -418,11 +428,10 @@ class EngineRuntime:
         ...
     def set_notify_order(self, enable: bool) -> None:
         """
-        Enable or disable verbose order-fill notifications.
-        
-        When enabled, the runtime emits ACCEPT/FILL/CANCEL messages to the
-        notification thread. Useful for debugging; disable in production for
-        maximum throughput.
+        Enable or disable order-fill notifications (EventKind: ACCEPT, FILL, CANCEL, REJECT, etc.).
+        When enabled and runtime was created with verbose=True, the engine prints events to stdout;
+        RejectReason is used for REJECT events. No Python callback is invoked unless added by bindings.
+        Disable in production for maximum throughput.
         """
         ...
     def get_notify_order(self) -> bool:

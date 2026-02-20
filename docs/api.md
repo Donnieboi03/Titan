@@ -76,7 +76,7 @@ submit_limit_order(
 
 **Parameters:**
 - `ticker` (str): Stock symbol
-- `side` (str): "BID" (buy) or "ASK" (sell)
+- `side` (str | OrderSide): "BID"/"bid"/"buy" or "ASK"/"ask"/"sell", or `OrderSide.BID` / `OrderSide.ASK`
 - `price` (float): Limit price in dollars
 - `qty` (float): Order quantity in shares
 - `user_id` (int, optional): User identifier. Default: `INVALID_USER_ID` (untracked)
@@ -103,7 +103,7 @@ Submit a market order (immediate execution).
 ```python
 submit_market_order(
     ticker: str,
-    side: str,
+    side: str | OrderSide,
     qty: float,
     user_id: int = INVALID_USER_ID
 ) -> int
@@ -111,7 +111,7 @@ submit_market_order(
 
 **Parameters:**
 - `ticker` (str): Stock symbol
-- `side` (str): "BID" (buy) or "ASK" (sell)
+- `side` (str | OrderSide): "BID"/"ASK" or `OrderSide.BID` / `OrderSide.ASK`
 - `qty` (float): Order quantity
 - `user_id` (int, optional): User identifier
 
@@ -138,13 +138,15 @@ submit_cancel_order(
     ticker: str,
     order_id: int,
     user_id: int = INVALID_USER_ID
-) -> None
+) -> bool
 ```
 
 **Parameters:**
 - `ticker` (str): Stock symbol
 - `order_id` (int): Order ID to cancel
 - `user_id` (int, optional): User identifier (for validation)
+
+**Returns:** `True` if the cancel was accepted, `False` on failure (e.g. order not found).
 
 **Notes:**
 - Only owner can cancel order
@@ -166,15 +168,19 @@ submit_edit_order(
     ticker: str,
     order_id: int,
     new_price: float,
+    new_qty: float,
     user_id: int = INVALID_USER_ID
-) -> None
+) -> bool
 ```
 
 **Parameters:**
 - `ticker` (str): Stock symbol
 - `order_id` (int): Order ID to modify
 - `new_price` (float): New limit price
+- `new_qty` (float): New quantity
 - `user_id` (int, optional): User identifier (for validation)
+
+**Returns:** `True` if the edit was accepted, `False` on failure (e.g. order not found).
 
 **Notes:**
 - Only owner can edit order
@@ -225,7 +231,7 @@ process_pending_orders_async(ticker: str) -> None
 
 #### set_notify_order() / get_notify_order()
 
-Enable or query order-fill notifications (accept/fill/partial fill/cancel). Only has effect when the runtime was created with `verbose=True`.
+Enable or query order-fill notifications. When enabled and the runtime was created with `verbose=True`, the engine emits events (e.g. to stdout) with **EventKind** (ACCEPT, REJECT, MODIFY, PARTIAL_FILL, FILL, CANCEL). Reject events use **RejectReason** (e.g. NO_MARKET_LIQUIDITY, ENGINE_FULL, ORDER_NOT_FOUND). No Python callback is invoked unless the bindings add one; current behavior is C++-side only (e.g. printing). Disable in production for maximum throughput.
 
 ```python
 set_notify_order(enable: bool) -> None
@@ -242,7 +248,7 @@ Look up an order by ticker and order ID.
 get_order(ticker: str, order_id: int) -> Optional[OrderInfo]
 ```
 
-**Returns:** `OrderInfo` if the order exists and is valid, else `None`.
+**Returns:** A **copy** of `OrderInfo` if the order exists and is valid, else `None`. The returned value is safe to hold after `process_pending_orders()` or other engine steps; it is not a reference to internal state.
 
 **Example:**
 ```python
@@ -314,13 +320,13 @@ spread = ask - bid
 Get order book depth (multiple levels).
 
 ```python
-get_market_depth(ticker: str, side: str, depth: int = 5) -> List[Tuple[float, float]]
+get_market_depth(ticker: str, side: str | OrderSide, depth: int = 5) -> List[Tuple[float, float]]
 ```
 
 **Parameters:**
 - `ticker` (str): Stock symbol
-- `side` (str): "BID" or "ASK"
-- `depth` (int): Number of levels to return. Default: 5
+- `side` (str | OrderSide): "BID"/"ASK" or `OrderSide.BID` / `OrderSide.ASK`
+- `depth` (int, optional): Number of levels to return. Default: 5
 
 **Returns:**
 - `List[Tuple[float, float]]`: List of (price, total_qty) tuples
@@ -595,7 +601,7 @@ class OrderSide(Enum):
 
 ### OrderInfo
 
-Returned by `get_order(ticker, order_id)`. Read-only view of an order.
+Returned by `get_order(ticker, order_id)` and `User.get_order_info(ticker, order_id)`. **Lifetime:** The API returns a **copy** of the order snapshot, not a pointer or reference. You may store and use the returned `OrderInfo` after calling `process_pending_orders()` or other engine steps; it will not be invalidated.
 
 **Attributes:** `side`, `type`, `status`, `time`, plus `get_price_dollars()`, `get_qty()`. Has a readable `__repr__` (e.g. `<OrderInfo BID LIMIT $149.50 x 100.0 [OPEN]>`).
 

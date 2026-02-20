@@ -18,9 +18,16 @@ using namespace backtest;
 
 // Helper to convert string to OrderSide
 static engine::OrderSide order_side_from_string(const std::string& side) {
-    if (side == "BID" || side == "bid" || side == "buy" || side == "BUY") 
+    if (side == "BID" || side == "bid" || side == "buy" || side == "BUY")
         return engine::OrderSide::BID;
     return engine::OrderSide::ASK;
+}
+
+// Accept side as str or OrderSide enum
+static engine::OrderSide side_from_py(const py::object& side_obj) {
+    if (py::isinstance<py::str>(side_obj))
+        return order_side_from_string(side_obj.cast<std::string>());
+    return side_obj.cast<engine::OrderSide>();
 }
 
 PYBIND11_MODULE(titan_core, m) {
@@ -97,16 +104,16 @@ PYBIND11_MODULE(titan_core, m) {
     // --- User class ---
     py::class_<user::User>(m, "User")
         // Order submissions
-        .def("submit_limit_order", 
-             [](user::User& self, const std::string& ticker, const std::string& side, 
+        .def("submit_limit_order",
+             [](user::User& self, const std::string& ticker, const py::object& side,
                 double price, double quantity) {
-                 return self.submit_limit_order(ticker, order_side_from_string(side), price, quantity);
+                 return self.submit_limit_order(ticker, side_from_py(side), price, quantity);
              },
              py::arg("ticker"), py::arg("side"), py::arg("price"), py::arg("quantity"),
              py::call_guard<py::gil_scoped_release>())
         .def("submit_market_order",
-             [](user::User& self, const std::string& ticker, const std::string& side, double quantity) {
-                 return self.submit_market_order(ticker, order_side_from_string(side), quantity);
+             [](user::User& self, const std::string& ticker, const py::object& side, double quantity) {
+                 return self.submit_market_order(ticker, side_from_py(side), quantity);
              },
              py::arg("ticker"), py::arg("side"), py::arg("quantity"),
              py::call_guard<py::gil_scoped_release>())
@@ -122,8 +129,8 @@ PYBIND11_MODULE(titan_core, m) {
         .def("get_best_ask", &user::User::get_best_ask, py::arg("ticker"))
         .def("get_market_price", &user::User::get_market_price, py::arg("ticker"))
         .def("get_market_depth",
-             [](user::User& self, const std::string& ticker, const std::string& side, std::size_t depth) {
-                 return self.get_market_depth(ticker, order_side_from_string(side), depth);
+             [](user::User& self, const std::string& ticker, const py::object& side, std::size_t depth) {
+                 return self.get_market_depth(ticker, side_from_py(side), depth);
              },
              py::arg("ticker"), py::arg("side"), py::arg("depth") = 10)
         .def("list_tickers", &user::User::list_tickers)
@@ -133,9 +140,14 @@ PYBIND11_MODULE(titan_core, m) {
         .def("get_active_orders", &user::User::get_active_orders, py::arg("ticker"))
         .def("get_position", &user::User::get_position, py::arg("ticker"))
         .def("get_all_positions", &user::User::get_all_positions)
-        .def("get_order_info", &user::User::get_order_info, 
-             py::arg("ticker"), py::arg("order_id"),
-             py::return_value_policy::reference)
+        .def("get_order_info",
+             [](const user::User& self, const std::string& ticker, engine::OrderId order_id) -> py::object {
+                 const engine::OrderInfo* info = self.get_order_info(ticker, order_id);
+                 if (!info) return py::none();
+                 engine::OrderInfo copy(*info);
+                 return py::cast(copy);
+             },
+             py::arg("ticker"), py::arg("order_id"))
         .def("has_sufficient_shares", &user::User::has_sufficient_shares,
              py::arg("ticker"), py::arg("qty"))
         
@@ -172,18 +184,17 @@ PYBIND11_MODULE(titan_core, m) {
         
         // Order submission (direct, for testing)
         .def("submit_limit_order",
-             [](runtime::EngineRuntime& self, const std::string& ticker, const std::string& side,
+             [](runtime::EngineRuntime& self, const std::string& ticker, const py::object& side,
                 double price, double qty, user::UserId user_id) {
-                 return self.submit_limit_order(ticker, order_side_from_string(side), 
-                                                 price, qty, user_id);
+                 return self.submit_limit_order(ticker, side_from_py(side), price, qty, user_id);
              },
              py::arg("ticker"), py::arg("side"), py::arg("price"), py::arg("qty"),
              py::arg("user_id") = user::INVALID_USER_ID,
              py::call_guard<py::gil_scoped_release>())
         .def("submit_market_order",
-             [](runtime::EngineRuntime& self, const std::string& ticker, const std::string& side,
+             [](runtime::EngineRuntime& self, const std::string& ticker, const py::object& side,
                 double qty, user::UserId user_id) {
-                 return self.submit_market_order(ticker, order_side_from_string(side), qty, user_id);
+                 return self.submit_market_order(ticker, side_from_py(side), qty, user_id);
              },
              py::arg("ticker"), py::arg("side"), py::arg("qty"),
              py::arg("user_id") = user::INVALID_USER_ID,
@@ -202,9 +213,9 @@ PYBIND11_MODULE(titan_core, m) {
         .def("get_best_bid", &runtime::EngineRuntime::get_best_bid, py::arg("ticker"))
         .def("get_best_ask", &runtime::EngineRuntime::get_best_ask, py::arg("ticker"))
         .def("get_market_depth",
-             [](runtime::EngineRuntime& self, const std::string& ticker, 
-                const std::string& side, std::size_t depth) {
-                 return self.get_market_depth(ticker, order_side_from_string(side), depth);
+             [](runtime::EngineRuntime& self, const std::string& ticker,
+                const py::object& side, std::size_t depth) {
+                 return self.get_market_depth(ticker, side_from_py(side), depth);
              },
              py::arg("ticker"), py::arg("side"), py::arg("depth") = 10)
         .def("list_tickers", &runtime::EngineRuntime::list_tickers)
@@ -251,13 +262,14 @@ PYBIND11_MODULE(titan_core, m) {
         .def("get_filled_count", &runtime::EngineRuntime::get_filled_count, py::arg("ticker"))
         .def("get_open_count", &runtime::EngineRuntime::get_open_count, py::arg("ticker"))
         
-        // Market data queries (additional)
+        // Market data queries (additional) — return a copy so Python can hold it safely
         .def("get_order",
              [](runtime::EngineRuntime& self, const std::string& ticker, engine::OrderId order_id)
              -> py::object {
                  const engine::OrderInfo* info = self.get_order(ticker, order_id);
                  if (!info) return py::none();
-                 return py::cast(info, py::return_value_policy::reference);
+                 engine::OrderInfo copy(*info);
+                 return py::cast(copy);
              },
              py::arg("ticker"), py::arg("order_id"))
 

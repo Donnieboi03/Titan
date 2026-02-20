@@ -485,7 +485,7 @@ void test_multi_stock_stress() {
     const int NUM_WORKERS = 4;  // One worker per stock for optimal parallelism
     
     backtest::runtime::EngineRuntime::reset_instance();
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(NUM_WORKERS, 1048576 * 2, false, 0);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(NUM_WORKERS, 1048576, false, 0);
     
     std::cout << "=== Multi-Stock Test (" << NUM_STOCKS << " stocks, " 
               << ORDERS_PER_STOCK << " orders each, " << NUM_STOCKS * ORDERS_PER_STOCK 
@@ -749,7 +749,7 @@ void test_simulate_throughput() {
     backtest::runtime::EngineRuntime::reset_instance();
     auto& runtime = backtest::runtime::EngineRuntime::get_instance(
         1,              // workers
-        1048576 * 16,   // capacity (16M orders)
+        1048576 * 8,   // capacity (16M orders)
         false,          // verbose
         0            // quantum
     );

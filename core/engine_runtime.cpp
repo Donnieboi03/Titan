@@ -1,6 +1,7 @@
 #include "engine_runtime.h"
 #include "market_data_parser.h"
 #include <functional>
+#include <mutex>
 
 // File-scope pointer so both get_instance() and reset_instance() can manage lifetime.
 static backtest::runtime::EngineRuntime* s_instance_ptr = nullptr;
