@@ -231,7 +231,7 @@ process_pending_orders_async(ticker: str) -> None
 
 #### set_notify_order() / get_notify_order()
 
-Enable or query order-fill notifications. When enabled and the runtime was created with `verbose=True`, the engine emits events (e.g. to stdout) with **EventKind** (ACCEPT, REJECT, MODIFY, PARTIAL_FILL, FILL, CANCEL). Reject events use **RejectReason** (e.g. NO_MARKET_LIQUIDITY, ENGINE_FULL, ORDER_NOT_FOUND). No Python callback is invoked unless the bindings add one; current behavior is C++-side only (e.g. printing). Disable in production for maximum throughput.
+Enable or query order-fill notifications. When enabled and the runtime was created with `verbose=True`, the engine emits events (e.g. to stdout) with **EventKind** (ACCEPT, REJECT, MODIFY, PARTIAL_FILL, FILL, CANCEL). Reject events use **RejectReason** (e.g. NO_MARKET_LIQUIDITY, ENGINE_FULL, ORDER_NOT_FOUND). No strategy registration is required to see these notifications. No Python callback is invoked unless the bindings add one; current behavior is C++-side only (e.g. printing). Disable in production for maximum throughput.
 
 ```python
 set_notify_order(enable: bool) -> None

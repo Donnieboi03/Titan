@@ -4,7 +4,9 @@
 #include <vector>
 #include <zlib.h>
 
-namespace parser
+// TODO: Future implementation can integrate an L3 parser (e.g. L3Stream) in this module for L3 event stream read/write.
+
+namespace stream
 {
     // Universal L2 Update structure
     struct L2Update
@@ -26,18 +28,21 @@ namespace parser
         uint8_t is_snapshot;
         char padding[6];
     };
-    
+
     static_assert(sizeof(L2UpdateBinary) == 32, "Binary record must be 32 bytes");
 
-    // Unified parser supporting .bin, .csv, and .csv.gz
-    class MarketDataParser
+    enum class StreamMode { Read, Write };
+
+    // L2 stream: read (replay) or write (record) L2 updates in Titan canonical format (.bin, .csv, .csv.gz)
+    class L2Stream
     {
     private:
         enum class Format { BINARY, CSV, CSV_GZ, UNKNOWN };
-        
+
+        StreamMode mode_;
         Format format_;
-        
-        // Binary format (mmap + SIMD)
+
+        // Read path state
         int fd_;
         const char* mapped_data_;
         size_t file_size_;
@@ -47,33 +52,48 @@ namespace parser
         L2Update prefetch_buffer_[SIMD_BATCH];
         size_t buffer_index_;
         size_t buffer_valid_;
-        
-        // Streaming mode (reduces memory from 2.6GB to ~64MB)
+
         bool use_streaming_;
         static constexpr size_t STREAM_BUFFER_SIZE = 64 * 1024 * 1024; // 64MB buffer
         std::vector<L2UpdateBinary> stream_buffer_;
         size_t stream_buffer_pos_;
         size_t stream_buffer_valid_;
         off_t file_position_;
-        
-        // CSV format (gzip support)
+
         gzFile gz_file_;
         char line_buffer_[1024];
         bool header_parsed_;
 
+        // Write path state
+        FILE* write_file_;
+        gzFile write_gz_file_;
+        bool write_binary_;
+        static constexpr size_t WRITE_BUFFER_SIZE = 1024;
+        std::vector<L2UpdateBinary> write_buffer_;
+        bool csv_header_written_;
+
     public:
-        explicit MarketDataParser(const std::string& filepath, bool streaming = true);
-        ~MarketDataParser();
+        // Read mode: open existing file for replay
+        explicit L2Stream(const std::string& filepath, bool streaming = true);
 
-        // Delete copy/move constructors (resource management)
-        MarketDataParser(const MarketDataParser&) = delete;
-        MarketDataParser& operator=(const MarketDataParser&) = delete;
-        MarketDataParser(MarketDataParser&&) = delete;
-        MarketDataParser& operator=(MarketDataParser&&) = delete;
+        // Write mode: create file for recording (format from extension: .bin -> binary, .csv/.csv.gz -> CSV)
+        L2Stream(const std::string& filepath, StreamMode mode);
 
+        ~L2Stream();
+
+        L2Stream(const L2Stream&) = delete;
+        L2Stream& operator=(const L2Stream&) = delete;
+        L2Stream(L2Stream&&) = delete;
+        L2Stream& operator=(L2Stream&&) = delete;
+
+        // Read path (valid only when opened for read)
         bool parse_next(L2Update& update);
         uint64_t get_total_records() const { return total_records_; }
         bool is_open() const;
+
+        // Write path (valid only when opened for write)
+        bool write(const L2Update& update);
+        void flush();
 
     private:
         Format detect_format(const std::string& filepath);
@@ -85,5 +105,8 @@ namespace parser
         bool parse_next_csv(L2Update& update);
         bool refill_buffer_simd();
         bool refill_stream_buffer();
+
+        void init_write(const std::string& filepath);
+        void flush_write_buffer();
     };
 }

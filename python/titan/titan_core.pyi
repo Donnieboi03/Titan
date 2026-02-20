@@ -502,36 +502,51 @@ class EngineRuntime:
 
 
 # ---------------------------------------------------------------------------
-# MarketDataParser
+# L2Stream
 # ---------------------------------------------------------------------------
 
-class MarketDataParser:
+class StreamMode:
+    """Mode for L2Stream: Read (replay) or Write (record)."""
+    Read: int
+    Write: int
+
+
+class L2Stream:
     """
-    Streaming parser for L2 market data files.
-    
-    Supports ``.bin`` (Titan binary format), ``.csv``, and ``.csv.gz``
-    (Tardis incremental_book_L2 format).
+    L2 market data stream: read (replay) or write (record) in Titan canonical format.
+    Supports ``.bin`` (binary), ``.csv``, and ``.csv.gz``.
     """
 
-    def __init__(self, filepath: str) -> None:
-        """Open a data file for streaming. Raises on file not found or unsupported format."""
+    def __init__(self, filepath: str, streaming: bool = True) -> None:
+        """Open for read (replay). Raises on file not found or unsupported format."""
+        ...
+
+    def __init__(self, filepath: str, mode: StreamMode) -> None:
+        """Open for write when mode is StreamMode.Write (record to file)."""
         ...
 
     def parse_next(self) -> Optional[Dict[str, Union[int, float, str, bool]]]:
         """
-        Return the next L2 update as a dict, or None when the file is exhausted.
+        Return the next L2 update as a dict, or None when exhausted (read mode only).
 
-        Dict keys:
-            ``timestamp`` (int)    — nanosecond timestamp  
-            ``price``     (float)  — price in dollars  
-            ``amount``    (float)  — quantity  
-            ``side``      (str)    — ``"b"`` (bid) or ``"a"`` (ask)  
-            ``is_snapshot`` (bool) — True for full snapshot rows
+        Dict keys: ``timestamp``, ``price``, ``amount``, ``side``, ``is_snapshot``.
         """
         ...
 
+    def get_total_records(self) -> int:
+        """Total records (read mode; binary format only)."""
+        ...
+
     def is_open(self) -> bool:
-        """Return True if the file is still open and parse_next() may return data."""
+        """True if the stream is open."""
+        ...
+
+    def write(self, update: Dict[str, Union[int, float, str, bool]]) -> bool:
+        """Append one L2 update (write mode only). Returns True on success."""
+        ...
+
+    def flush(self) -> None:
+        """Flush buffered data (write mode only)."""
         ...
 
     def close(self) -> None:

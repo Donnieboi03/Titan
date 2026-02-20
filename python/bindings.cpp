@@ -11,7 +11,7 @@
 // Pull in engine headers (implementations are compiled separately)
 #include "../core/order_engine.h"
 #include "../core/engine_runtime.h"
-#include "../core/market_data_parser.h"
+#include "../core/market_data_stream.h"
 
 namespace py = pybind11;
 using namespace backtest;
@@ -320,12 +320,13 @@ PYBIND11_MODULE(titan_core, m) {
         .def_readonly("cache_entries", &runtime::SimulationMetrics::cache_entries)
         .def_readonly("simulation_running", &runtime::SimulationMetrics::simulation_running);
 
-    // --- MarketDataParser ---
-    py::class_<parser::MarketDataParser>(m, "MarketDataParser")
-        .def(py::init<const std::string&>(), py::arg("filepath"))
+    // --- L2Stream (read/write L2 market data) ---
+    py::class_<stream::L2Stream>(m, "L2Stream")
+        .def(py::init<const std::string&, bool>(), py::arg("filepath"), py::arg("streaming") = true)
+        .def(py::init<const std::string&, stream::StreamMode>(), py::arg("filepath"), py::arg("mode"))
         .def("parse_next",
-             [](parser::MarketDataParser& self) -> py::object {
-                 parser::L2Update update;
+             [](stream::L2Stream& self) -> py::object {
+                 stream::L2Update update;
                  bool ok = false;
                  {
                      py::gil_scoped_release release;
@@ -342,10 +343,26 @@ PYBIND11_MODULE(titan_core, m) {
                  result["is_snapshot"] = update.is_snapshot;
                  return result;
              })
-        .def("is_open", &parser::MarketDataParser::is_open)
-        .def("close", [](parser::MarketDataParser& self) {
-             // No-op: C++ parser closes in destructor. Exposed for API compatibility (e.g. test_bindings).
+        .def("get_total_records", &stream::L2Stream::get_total_records)
+        .def("is_open", &stream::L2Stream::is_open)
+        .def("write",
+             [](stream::L2Stream& self, const py::dict& d) {
+                 stream::L2Update u;
+                 u.timestamp = d.contains("timestamp") ? d["timestamp"].cast<int64_t>() : 0;
+                 u.price = d.contains("price") ? d["price"].cast<double>() : 0.0;
+                 u.amount = d.contains("amount") ? d["amount"].cast<double>() : 0.0;
+                 std::string s = d.contains("side") ? d["side"].cast<std::string>() : "b";
+                 u.side = s.empty() ? 'b' : s[0];
+                 u.is_snapshot = d.contains("is_snapshot") && d["is_snapshot"].cast<bool>();
+                 return self.write(u);
+             }, py::arg("update"))
+        .def("flush", &stream::L2Stream::flush)
+        .def("close", [](stream::L2Stream& self) {
              (void)self;
              });
+    py::enum_<stream::StreamMode>(m, "StreamMode")
+        .value("Read", stream::StreamMode::Read)
+        .value("Write", stream::StreamMode::Write)
+        .export_values();
 }
 

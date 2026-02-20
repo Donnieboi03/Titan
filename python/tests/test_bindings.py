@@ -18,7 +18,7 @@ try:
     from titan import (
         EngineRuntime,
         User,
-        MarketDataParser,
+        L2Stream,
         OrderSide,
         OrderStatus,
         INVALID_USER_ID
@@ -118,9 +118,9 @@ def test_strategy_registration():
     print("\n")
 
 def test_market_data_parser():
-    """Test market data parser."""
+    """Test L2 stream (replay)."""
     print("=" * 60)
-    print("Test 3: Market Data Parser")
+    print("Test 3: L2 Stream")
     print("=" * 60)
 
     data_file = _repo_root / "core/test/examples/binance-futures_incremental_book_L2_2024-01-01_BTCUSDT_titan.csv"
@@ -132,7 +132,7 @@ def test_market_data_parser():
         return
 
     try:
-        parser = MarketDataParser(data_file)
+        parser = L2Stream(data_file)
         print(f"✓ Opened data file: {data_file}")
 
         # Parse first 10 updates

@@ -12,7 +12,8 @@ try:
     from .titan_core import (
         EngineRuntime,
         User,
-        MarketDataParser,
+        L2Stream,
+        StreamMode,
         OrderInfo,
         OrderSide,
         OrderStatus,
@@ -34,8 +35,11 @@ except ImportError as e:
         pass
     class User:
         pass
-    class MarketDataParser:
+    class L2Stream:
         pass
+    class StreamMode:
+        Read = 0
+        Write = 1
     class OrderInfo:
         pass
     class SimulationMetrics:
@@ -44,7 +48,8 @@ except ImportError as e:
 __all__ = [
     "EngineRuntime",
     "User",
-    "MarketDataParser",
+    "L2Stream",
+    "StreamMode",
     "OrderInfo",
     "SimulationMetrics",
     "OrderSide",

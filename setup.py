@@ -45,7 +45,7 @@ ext_modules = [
         'titan.titan_core',
         sources=[
             'python/bindings.cpp',
-            'core/market_data_parser.cpp',
+            'core/market_data_stream.cpp',
             'core/order_engine.cpp',
             'core/engine_runtime.cpp',
         ],
@@ -62,14 +62,14 @@ try:
     with open("README.md", "r", encoding="utf-8") as fh:
         long_description = fh.read()
 except FileNotFoundError:
-    long_description = "Titan: Multi-Agent Market Microstructure Backtesting Engine"
+    long_description = "Titan: Multi-Agent Market Microstructure Backtesting Library"
 
 
 setup(
     name="titan-backtesting",
-    version="2.1.0",
-    author="Titan Contributors",
-    description="Multi-agent market microstructure backtesting engine",
+    version="2.2.0",
+    author="https://github.com/Donnieboi03",
+    description="Multi-agent market microstructure backtesting library",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/Donnieboi03/Titan",

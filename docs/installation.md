@@ -45,7 +45,7 @@ The C++ extension links against **Highway** (SIMD) and **zlib**. Install them be
 pip install -e .
 ```
 
-This builds the C++ extension (order engine, runtime, market data parser) and installs the `titan` package in editable mode. No separate CMake step is needed to use the library.
+This builds the C++ extension (order engine, runtime, market data stream) and installs the `titan` package in editable mode. No separate CMake step is needed to use the library.
 
 To install without editable mode (fixed install): `pip install .`
 

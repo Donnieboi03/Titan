@@ -1,5 +1,5 @@
 // Compile and run:
-// clang++ -std=c++20 -O3 -DNDEBUG -I/opt/homebrew/include -L/opt/homebrew/lib strategy_realdata_test.cpp ../market_data_parser.cpp -lhwy -lz -o strategy_realdata_test && ./strategy_realdata_test
+// clang++ -std=c++20 -O3 -DNDEBUG -I/opt/homebrew/include -L/opt/homebrew/lib strategy_realdata_test.cpp ../market_data_stream.cpp -lhwy -lz -o strategy_realdata_test && ./strategy_realdata_test
 
 #include <iostream>
 #include <iomanip>
@@ -8,12 +8,12 @@
 #include <cassert>
 #include "../order_engine.cpp"
 #include "../engine_runtime.cpp"
-#include "../market_data_parser.h"
+#include "../market_data_stream.h"
 
 using namespace backtest::runtime;
 using namespace backtest::user;
 using namespace engine;
-using namespace parser;
+using namespace stream;
 
 // Statistics tracking
 struct StrategyStats {
@@ -105,7 +105,7 @@ void test_strategy_with_real_data(const std::string& data_file, const std::strin
     auto& runtime = EngineRuntime::get_instance(1, 16 * 1024 * 1024, false);
     
     // Parse first 5 orders to get average initial price
-    MarketDataParser price_parser(data_file);
+    L2Stream price_parser(data_file);
     L2Update price_update;
     double initial_price = 95000.0;  // Realistic BTCUSDT price as fallback
     std::vector<double> first_prices;
@@ -149,7 +149,7 @@ void test_strategy_with_real_data(const std::string& data_file, const std::strin
     
     // Parse and replay market data
     std::cout << "Parsing market data...\n";
-    MarketDataParser parser(data_file);
+    L2Stream parser(data_file);
     L2Update update;
     uint64_t event_count = 0;
     uint64_t orders_submitted = 0;

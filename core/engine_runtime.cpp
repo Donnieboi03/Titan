@@ -1,5 +1,5 @@
 #include "engine_runtime.h"
-#include "market_data_parser.h"
+#include "market_data_stream.h"
 #include <functional>
 #include <mutex>
 
@@ -284,19 +284,23 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_limit_order_async_impl(
         }
         
         engine::OrderId order_id;
-        if (runtime_ptr->users_.empty()) {
+        const bool use_message_path = !runtime_ptr->users_.empty() || runtime_ptr->notify_order_.load(std::memory_order_acquire);
+        if (!use_message_path) {
             order_id = runtime_ptr->engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::LIMIT, price_ticks, qty_ticks);
         } else {
             std::vector<engine::EngineMsg> msgs;
-            bool collect_accept = (user_id != user::INVALID_USER_ID);
+            bool collect_accept = runtime_ptr->users_.empty() || (user_id != user::INVALID_USER_ID);
             std::function<bool(engine::OrderId)> fill_filter_fn = [rt = runtime_ptr](engine::OrderId id) { return rt->order_to_user_.find(id) != rt->order_to_user_.end(); };
-            order_id = runtime_ptr->engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::LIMIT, price_ticks, qty_ticks, msgs, collect_accept, &fill_filter_fn);
+            const std::function<bool(engine::OrderId)>* fill_filter_ptr = runtime_ptr->users_.empty() ? nullptr : &fill_filter_fn;
+            order_id = runtime_ptr->engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::LIMIT, price_ticks, qty_ticks, msgs, collect_accept, fill_filter_ptr);
             for (const auto& msg : msgs) {
                 runtime_ptr->notify_order_event("[LIMIT ORDER]", order_id, msg.kind);
-                if (msg.kind == engine::EventKind::ACCEPT) {
-                    runtime_ptr->handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, price_ticks);
+                if (user_id != user::INVALID_USER_ID) {
+                    if (msg.kind == engine::EventKind::ACCEPT) {
+                        runtime_ptr->handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, price_ticks);
+                    }
+                    runtime_ptr->handle_fill_event(msg, engine_id);
                 }
-                runtime_ptr->handle_fill_event(msg, engine_id);
             }
         }
         
@@ -364,19 +368,23 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_limit_order_sync_impl(c
         }
         
         engine::OrderId order_id;
-        if (users_.empty()) {
+        const bool use_message_path = !users_.empty() || notify_order_.load(std::memory_order_acquire);
+        if (!use_message_path) {
             order_id = engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::LIMIT, price_ticks, qty_ticks);
         } else {
             std::vector<engine::EngineMsg> msgs;
-            bool collect_accept = (user_id != user::INVALID_USER_ID);
+            bool collect_accept = users_.empty() || (user_id != user::INVALID_USER_ID);
             std::function<bool(engine::OrderId)> fill_filter_fn = [this](engine::OrderId id) { return order_to_user_.find(id) != order_to_user_.end(); };
-            order_id = engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::LIMIT, price_ticks, qty_ticks, msgs, collect_accept, &fill_filter_fn);
+            const std::function<bool(engine::OrderId)>* fill_filter_ptr = users_.empty() ? nullptr : &fill_filter_fn;
+            order_id = engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::LIMIT, price_ticks, qty_ticks, msgs, collect_accept, fill_filter_ptr);
             for (const auto& msg : msgs) {
                 notify_order_event("[LIMIT ORDER]", order_id, msg.kind);
-                if (msg.kind == engine::EventKind::ACCEPT) {
-                    handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, price_ticks);
+                if (user_id != user::INVALID_USER_ID) {
+                    if (msg.kind == engine::EventKind::ACCEPT) {
+                        handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, price_ticks);
+                    }
+                    handle_fill_event(msg, engine_id);
                 }
-                handle_fill_event(msg, engine_id);
             }
         }
         
@@ -460,19 +468,23 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_market_order_async_impl
         }
         
         engine::OrderId order_id;
-        if (runtime_ptr->users_.empty()) {
+        const bool use_message_path = !runtime_ptr->users_.empty() || runtime_ptr->notify_order_.load(std::memory_order_acquire);
+        if (!use_message_path) {
             order_id = runtime_ptr->engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::MARKET, market_price, qty_ticks);
         } else {
             std::vector<engine::EngineMsg> msgs;
-            bool collect_accept = (user_id != user::INVALID_USER_ID);
+            bool collect_accept = runtime_ptr->users_.empty() || (user_id != user::INVALID_USER_ID);
             std::function<bool(engine::OrderId)> fill_filter_fn = [rt = runtime_ptr](engine::OrderId id) { return rt->order_to_user_.find(id) != rt->order_to_user_.end(); };
-            order_id = runtime_ptr->engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::MARKET, market_price, qty_ticks, msgs, collect_accept, &fill_filter_fn);
+            const std::function<bool(engine::OrderId)>* fill_filter_ptr = runtime_ptr->users_.empty() ? nullptr : &fill_filter_fn;
+            order_id = runtime_ptr->engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::MARKET, market_price, qty_ticks, msgs, collect_accept, fill_filter_ptr);
             for (const auto& msg : msgs) {
                 runtime_ptr->notify_order_event("[MARKET ORDER]", order_id, msg.kind);
-                if (msg.kind == engine::EventKind::ACCEPT) {
-                    runtime_ptr->handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, market_price);
+                if (user_id != user::INVALID_USER_ID) {
+                    if (msg.kind == engine::EventKind::ACCEPT) {
+                        runtime_ptr->handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, market_price);
+                    }
+                    runtime_ptr->handle_fill_event(msg, engine_id);
                 }
-                runtime_ptr->handle_fill_event(msg, engine_id);
             }
         }
         
@@ -544,19 +556,23 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_market_order_sync_impl(
         }
         
         engine::OrderId order_id;
-        if (users_.empty()) {
+        const bool use_message_path = !users_.empty() || notify_order_.load(std::memory_order_acquire);
+        if (!use_message_path) {
             order_id = engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::MARKET, market_price, qty_ticks);
         } else {
             std::vector<engine::EngineMsg> msgs;
-            bool collect_accept = (user_id != user::INVALID_USER_ID);
+            bool collect_accept = users_.empty() || (user_id != user::INVALID_USER_ID);
             std::function<bool(engine::OrderId)> fill_filter_fn = [this](engine::OrderId id) { return order_to_user_.find(id) != order_to_user_.end(); };
-            order_id = engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::MARKET, market_price, qty_ticks, msgs, collect_accept, &fill_filter_fn);
+            const std::function<bool(engine::OrderId)>* fill_filter_ptr = users_.empty() ? nullptr : &fill_filter_fn;
+            order_id = engines_info_[engine_id].engine_->place_order(_side, engine::OrderType::MARKET, market_price, qty_ticks, msgs, collect_accept, fill_filter_ptr);
             for (const auto& msg : msgs) {
                 notify_order_event("[MARKET ORDER]", order_id, msg.kind);
-                if (msg.kind == engine::EventKind::ACCEPT) {
-                    handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, market_price);
+                if (user_id != user::INVALID_USER_ID) {
+                    if (msg.kind == engine::EventKind::ACCEPT) {
+                        handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, market_price);
+                    }
+                    handle_fill_event(msg, engine_id);
                 }
-                handle_fill_event(msg, engine_id);
             }
         }
         
@@ -1355,13 +1371,13 @@ bool backtest::runtime::EngineRuntime::simulate
     double shares_outstanding // IPO Shares
 )
 {   
-    std::unique_ptr<parser::MarketDataParser> parser; // Parser
+    std::unique_ptr<stream::L2Stream> parser; // L2 stream for replay
     double initial_price = 100.0;  // IPO Price
     try 
     {
-        parser = std::make_unique<parser::MarketDataParser>(filepath);
-        // Test Parser through IPO setup
-        parser::L2Update ipo_update;
+        parser = std::make_unique<stream::L2Stream>(filepath);
+        // Test parser through IPO setup
+        stream::L2Update ipo_update;
         double sample_sum = 0.0;
         std::size_t sample_count = 0;
         while (parser->parse_next(ipo_update) && sample_count < price_sample_size) 
@@ -1438,7 +1454,7 @@ bool backtest::runtime::EngineRuntime::simulate
             return (static_cast<uint64_t>(price_ticks) << 1) | side_bit;
         };
         
-        parser::L2Update update;
+        stream::L2Update update;
         std::vector<engine::EngineMsg> msgs; // reused across iterations to avoid repeated alloc/free
         msgs.reserve(16);
         // Main simulation loop with direct engine calls and metrics tracking

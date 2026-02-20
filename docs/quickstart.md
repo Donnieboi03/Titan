@@ -30,7 +30,7 @@ runtime = titan.EngineRuntime.get_instance(
 - `verbose`: Enable debug logging (default: False). Set to `True` if you want order accept/fill/cancel messages.
 - `quantum`: Scheduling quantum (default: 1000)
 
-**Order notifications:** To see accept/fill/cancel messages, use `verbose=True` and call `runtime.set_notify_order(True)`. Notifications are only emitted when at least one strategy is registered (so register a strategy before placing orders if you want to see them).
+**Order notifications:** To see accept/fill/cancel messages on the console, use `verbose=True` and call `runtime.set_notify_order(True)`. No strategy registration is required.
 
 ### Step 3: Register a stock
 
@@ -171,12 +171,12 @@ for ticker in ["AAPL", "MSFT", "GOOGL"]:
 
 ## Historical L2 data replay
 
-Titan can parse L2 updates from `.bin`, `.csv`, or `.csv.gz` files. Example:
+Titan can parse L2 updates from `.bin`, `.csv`, or `.csv.gz` files using `L2Stream`. Example:
 
 ```python
-from titan import MarketDataParser
+from titan import L2Stream
 
-parser = MarketDataParser("core/test/examples/binance-futures_incremental_book_L2_2024-01-01_BTCUSDT_titan.csv")
+parser = L2Stream("core/test/examples/binance-futures_incremental_book_L2_2024-01-01_BTCUSDT_titan.csv")
 while True:
     update = parser.parse_next()
     if update is None:

@@ -2,9 +2,9 @@
 #include <iomanip>
 #include <chrono>
 #include <string>
-#include "../market_data_parser.h"
+#include "../market_data_stream.h"
 
-using namespace parser;
+using namespace stream;
 
 void print_update(const L2Update& update, int count)
 {
@@ -22,7 +22,7 @@ void benchmark_parser(const std::string& filepath)
     std::cout << "\n=== Benchmarking: " << filepath << " ===\n";
     
     try {
-        MarketDataParser parser(filepath);
+        L2Stream parser(filepath);
         
         if (!parser.is_open()) {
             std::cerr << "ERROR: Failed to open file\n";
@@ -41,7 +41,7 @@ void benchmark_parser(const std::string& filepath)
         }
         
         // Benchmark full parse
-        MarketDataParser benchmark_parser(filepath);
+        L2Stream benchmark_parser(filepath);
         uint64_t total_parsed = 0;
         
         auto start = std::chrono::high_resolution_clock::now();
@@ -82,7 +82,7 @@ void test_format_detection()
     
     for (const auto& [file, expected] : test_files) {
         try {
-            MarketDataParser parser(file);
+            L2Stream parser(file);
             std::cout << "✓ " << file << " detected as valid format\n";
         } catch (const std::exception& e) {
             std::cout << "✗ " << file << " - " << e.what() << "\n";
