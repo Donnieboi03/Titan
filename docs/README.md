@@ -4,7 +4,7 @@
 
 ## Docs
 
-- [Installation](installation.md) – How to install the Titan Python library from source
+- [Installation](installation.md) – How to install the Titan Python library (from source or [Docker](installation.md#docker))
 - [Quick Start](quickstart.md) – Your first backtest in a few minutes
 - [API Reference](api.md) – Python API documentation
 

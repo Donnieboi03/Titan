@@ -1,15 +1,15 @@
-# .env files
+# Environment and secrets
 .env
+.env.*
+!.env.example
 
-# Log files
-.log
+# Logs and temp
+*.log
 logs/
-
-# Temp files
 *temp*
 *tmp*
 
-# Debug symbol files
+# Debug symbols (macOS)
 *.dSYM
 **/*.dSYM/
 
@@ -18,19 +18,39 @@ build/
 dist/
 *.egg
 *.egg-info/
-__pycache__/
 .eggs/
 **/titan_core*.so
 **/*.so
 .DS_Store
 
-# Docs (optional; uncomment if you want docs in repo)
-# docs/
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.ruff_cache/
 
-# Keep .txt only if you use it for temp notes
-# .txt
+# Virtual environments
+venv/
+.venv/
+env/
 
-# Market data example files (too large for git — use download_market_data.py to populate)
+# C++ build artifacts (object files, test binaries)
+*.o
+*.out
+*.a
+*.dylib
+
+# IDE / editor
+.cursor/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Market data (too large — use download_market_data.py to populate)
 core/test/examples/*.bin
 core/test/examples/*.csv.gz
 

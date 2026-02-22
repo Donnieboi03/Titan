@@ -12,6 +12,8 @@ Central coordinator for all market activity.
 
 Get the singleton runtime (create or reuse). Call `reset_instance()` first to reinitialize.
 
+**Process exit:** The package registers `reset_instance` with `atexit`, so when the Python process exits the runtime is torn down and log/record buffers are flushed before shutdown.
+
 ```python
 EngineRuntime.get_instance(
     num_threads=4,
@@ -229,6 +231,16 @@ process_pending_orders_async(ticker: str) -> None
 
 ---
 
+#### get_quantum()
+
+Return the current quantum (order count between strategy runs, snapshot updates, and L2 record snapshots). Set at runtime creation via `get_instance(..., quantum=1000)`.
+
+```python
+get_quantum() -> int
+```
+
+---
+
 #### set_notify_order() / get_notify_order()
 
 Enable or query order-fill notifications. When enabled and the runtime was created with `verbose=True`, the engine emits events (e.g. to stdout) with **EventKind** (ACCEPT, REJECT, MODIFY, PARTIAL_FILL, FILL, CANCEL). Reject events use **RejectReason** (e.g. NO_MARKET_LIQUIDITY, ENGINE_FULL, ORDER_NOT_FOUND). No strategy registration is required to see these notifications. No Python callback is invoked unless the bindings add one; current behavior is C++-side only (e.g. printing). Disable in production for maximum throughput.
@@ -236,6 +248,34 @@ Enable or query order-fill notifications. When enabled and the runtime was creat
 ```python
 set_notify_order(enable: bool) -> None
 get_notify_order() -> bool
+```
+
+---
+
+#### set_record() / get_record()
+
+Enable or disable per-ticker L2 recording. When enabled, the **order book snapshot** (top 20 bid and 20 ask levels, in L2 format) is written at each **quantum**—the same cadence as strategy callbacks and snapshot updates. Recording is lock-free and applies to both simulation (e.g. `simulate()`) and live order flow (e.g. `submit_limit_order`, `process_pending_orders`). Each quantum emits up to 40 L2 rows (20 bid + 20 ask) for that ticker. Output is written by the event management thread to the default path `{ticker}.csv`, or to a custom path when provided.
+
+```python
+set_record(ticker: str, enable: bool) -> None
+set_record(ticker: str, enable: bool, path_override: str) -> None
+get_record(ticker: str) -> bool
+```
+
+**Parameters:**
+- `ticker`: Stock symbol (must be registered).
+- `enable`: `True` to record, `False` to stop.
+- `path_override` (optional): Custom output path (e.g. `"output/AAPL.csv"`). When provided, recordings go to this file instead of the default `{ticker}.csv`.
+
+**Example:**
+```python
+runtime.register_stock("AAPL", 150.0, 1_000_000.0)
+runtime.set_record("AAPL", True)  # Enable quantum-based book snapshot recording to AAPL.csv
+# Or with custom path:
+runtime.set_record("AAPL", True, "recordings/aapl_replay.csv")
+runtime.simulate("data/aapl_l2.csv", "AAPL")  # (or use live orders + process_pending_orders)
+print(runtime.get_record("AAPL"))  # True
+runtime.set_record("AAPL", False)  # Stop recording
 ```
 
 ---
@@ -259,13 +299,36 @@ if info is not None:
 
 ---
 
-#### unregister_strategy()
+#### register_strategy()
 
-Remove a registered strategy (user) by user ID.
+Register a strategy (callable) for a specific ticker. The strategy is bound to that ticker and invoked every **quantum** (every N orders on that ticker)—the same cadence as snapshot updates and L2 recording. The quantum interval is set at runtime creation via `get_instance(..., quantum=1000)` and can be read with `get_quantum()`.
 
 ```python
-unregister_strategy(user_id: int) -> None
+register_strategy(
+    ticker: str,
+    strategy: Callable[[User], None],
+    starting_capital: float = 100000.0
+) -> Optional[User]
 ```
+
+**Parameters:**
+- `ticker` (str): Stock symbol this strategy is bound to (must already be registered via `register_stock()`).
+- `strategy` (callable): Function receiving a `User` handle; called on each quantum for this ticker.
+- `starting_capital` (float): Initial cash balance. Default: 100000.0
+
+**Returns:** `User` handle for positions/PnL, or `None` if ticker not found.
+
+---
+
+#### unregister_strategy()
+
+Remove a registered strategy (user) by user ID. When a stock is unregistered, all strategies for that ticker are automatically unregistered.
+
+```python
+unregister_strategy(user_id: int) -> bool
+```
+
+**Returns:** `True` on success, `False` if user_id not found.
 
 ---
 
@@ -317,16 +380,16 @@ spread = ask - bid
 
 #### get_market_depth()
 
-Get order book depth (multiple levels).
+Get order book depth (multiple levels). The engine exposes up to **20** levels per side.
 
 ```python
-get_market_depth(ticker: str, side: str | OrderSide, depth: int = 5) -> List[Tuple[float, float]]
+get_market_depth(ticker: str, side: str | OrderSide, depth: int = 20) -> List[Tuple[float, float]]
 ```
 
 **Parameters:**
 - `ticker` (str): Stock symbol
 - `side` (str | OrderSide): "BID"/"ASK" or `OrderSide.BID` / `OrderSide.ASK`
-- `depth` (int, optional): Number of levels to return. Default: 5
+- `depth` (int, optional): Number of levels to return (up to 20). Default: 20
 
 **Returns:**
 - `List[Tuple[float, float]]`: List of (price, total_qty) tuples

@@ -93,10 +93,10 @@ void test_order_inspection() {
     
     // Register stock
     std::string ticker = "TEST";
-    runtime.register_stock(ticker, 100.0, 1000.0);
+    runtime.register_stock(std::string(ticker), 100.0, 1000.0);
     
-    // Register strategies
-    User* manager = runtime.register_strategy(order_managing_strategy, 100000.0);
+    // Register strategy for this ticker
+    User* manager = runtime.register_strategy(std::string(ticker), order_managing_strategy, 100000.0);
     
     std::cout << "Registered strategy: Manager (User " << manager->get_user_id() << ")\n\n";
     

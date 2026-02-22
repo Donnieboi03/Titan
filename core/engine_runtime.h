@@ -3,11 +3,12 @@
 
 #include "engine_runtime_types.h"
 #include "tools/job_scheduler.h"
+#include "tools/double_buffer.h"
+#include "market_data_stream.h"
 #include <iostream>
 #include <iomanip>
 #include <tuple>
 #include <atomic>
-#include <condition_variable>
 
 
 namespace backtest
@@ -129,15 +130,15 @@ namespace backtest
                 std::size_t num_threads = 1, // Num of Threads to Execute Engines
                 std::size_t default_capacity = 1048576, // Default Size Created Engine 
                 bool verbose = false, // Notification System ON / OFF
-                std::size_t quantum_orders = CACHE_LINE // Interval Between User Strategy Executions & SnapShot Updates
+                std::size_t quantum_orders = engine::CACHE_LINE // Interval Between User Strategy Executions & SnapShot Updates
             );
             
             // Reset State of instance to allow reinitialization
             static void reset_instance();
             
-            // Stock registration
-            bool register_stock(const std::string& ticker, double ipo_price, double ipo_qty, std::size_t capacity = 0);
-            bool unregister_stock(const std::string& ticker);
+            // Stock registration (rvalue; use std::forward when passing strings on)
+            bool register_stock(std::string&& ticker, double ipo_price, double ipo_qty, std::size_t capacity = 0);
+            bool unregister_stock(std::string&& ticker);
 
             // Order submission (async by default; returns order ID or engine::INVALID_ORDER_ID; sync path returns real ID when used via User)
             engine::OrderId submit_limit_order(const std::string& ticker, engine::OrderSide side, double price, double qty, user::UserId user_id = user::INVALID_USER_ID);
@@ -160,6 +161,11 @@ namespace backtest
             // Control order fill notifications
             void set_notify_order(bool enable) noexcept { notify_order_.store(enable, std::memory_order_release); }
             bool get_notify_order() const noexcept { return notify_order_.load(std::memory_order_acquire); }
+
+            // Per-ticker L2 recording (written by event management thread; hot path is lock-free)
+            void set_record(std::string&& ticker, bool enable) noexcept;
+            void set_record(std::string&& ticker, bool enable, std::string&& path_override) noexcept;
+            bool get_record(const std::string& ticker) const noexcept;
            
             // Control engine matching (toggle ON/OF allowing for control of books)
             bool set_auto_match(const std::string& ticker, bool auto_match);
@@ -183,11 +189,12 @@ namespace backtest
             // Registers stock and starts simulation asynchronously
             // Use is_simulation_running(), get_simulation_metrics() to monitor progress
             bool simulate(
-                const std::string& filepath,
-                const std::string& ticker,
+                std::string&& filepath,
+                std::string&& ticker,
                 std::size_t target_orders = 0,
                 std::size_t price_sample_size = 10,
-                double shares_outstanding = 1000000.0
+                double shares_outstanding = 1000000.0,
+                std::string&& record_path = {}
             );
             
             // Async simulation status methods
@@ -217,8 +224,8 @@ namespace backtest
             std::size_t get_pending_count(const std::string& ticker) const;
             bool order_exists(const std::string& ticker, engine::OrderId order_id) const;
             
-            // Strategy Registration
-            user::User* register_strategy(user::Strategy strategy, double starting_capital = 100000.0);
+            // Strategy Registration (ticker required for deterministic per-engine quantum)
+            user::User* register_strategy(std::string&& ticker, user::Strategy strategy, double starting_capital = 100000.0);
             bool unregister_strategy(user::UserId user_id);
 
             // Helper methods for User class (User delegates to these via friend access)
@@ -233,12 +240,14 @@ namespace backtest
             
             static inline bool instance_initialized_ = false; // Track if instance is created
             
-             // Notification management
-            void start_notification_thread() noexcept;
-            void stop_notification_thread() noexcept;
-            void notification_loop() noexcept;
-            void notify(const std::string& message) noexcept;
-                        
+            // Event management thread (log + record)
+            void start_event_management_thread() noexcept;
+            void stop_event_management_thread() noexcept;
+            void event_management_loop() noexcept;
+            void notify(std::string&& message) noexcept;
+            void record(EngineId engine_id, const stream::L2Update& update) noexcept;
+            void record_book_snapshot(EngineId engine_id) noexcept;
+
             // Snapshot management
             void update_snapshot_internal(EngineId engine_id) const noexcept;
             const engine::MarketSnapshot* get_snapshot_fast(EngineId engine_id) const noexcept;
@@ -281,20 +290,28 @@ namespace backtest
             std::unordered_map<engine::OrderId, user::UserId> order_to_user_; // OrderId -> UserId
             // Strategy management (raw pointers, caller manages lifetime)
             std::vector<user::User> users_;
+            // Per-engine strategy indices: users_per_engine_[engine_id] = indices into users_
+            std::vector<std::vector<std::size_t>> users_per_engine_;
+            // strategy_engine_id_[idx] = engine_id for users_[idx] (parallel to users_)
+            std::vector<EngineId> user_strategy_engine_id_;
             
             // Fast snapshot access cache: store pointer to the engine so we can fetch
             std::vector<engine::OrderEngine*> snapshot_cache_;
             
             const std::size_t quantum_orders_; // Quantum in order count (immutable after construction)
-            // Global quantum counter for strategy execution (shared across engines)
-            alignas(CACHE_LINE) std::atomic<std::size_t> global_orders_since_quantum_{0};
 
-            alignas(CACHE_LINE) std::atomic<bool> notification_thread_running_{false}; // Notification thread control
-            std::thread notification_thread_; // Notification thread for verbose output
-            // TODO: Make Lock-Free Design (NO MUTEX)
-            LazyQueue<std::string> notification_buffer_; // Buffer for notification messages
-            mutable std::mutex notification_mutex_; // Mutex for notification buffer
-            std::condition_variable notification_cv_; // Sleep-lock for notification thread
+            alignas(engine::CACHE_LINE) std::atomic<bool> event_management_thread_running_{false}; // Event management thread control
+            std::thread event_management_thread_; // Event management thread (drains log + record buffers)
+            static constexpr std::size_t LOG_BUFFER_CAPACITY = 65536;
+            static constexpr std::size_t RECORD_BUFFER_CAPACITY = 65536;
+            using RecordItem = std::pair<EngineId, stream::L2Update>;
+            DoubleBuffer<std::string> log_buffer_;
+            DoubleBuffer<RecordItem> record_buffer_;
+
+            // Per-engine recording state (grown in register_stock; unique_ptr for atomic non-copyability)
+            std::vector<std::unique_ptr<std::atomic<bool>>> record_enabled_;
+            std::vector<std::string> record_path_override_;
+            std::unordered_map<EngineId, std::unique_ptr<stream::L2Stream>> record_streams_; // Lazy-open in event management thread
 
             UserAPI sync_order_api_;
         };

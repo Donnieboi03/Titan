@@ -59,12 +59,12 @@ void test_basic_strategy_registration() {
     bool registered = runtime.register_stock("BTC", 100000.0, 10.0);
     assert(registered && "Stock registration failed");
     
-    // Register strategy
-    user::User* user1 = runtime.register_strategy(market_maker_strategy, 50000.0);
+    // Register strategies for this ticker
+    user::User* user1 = runtime.register_strategy("BTC", market_maker_strategy, 50000.0);
     assert(user1 != nullptr && "Strategy registration failed");
     assert(user1->get_user_id() == 1 && "First user should have ID 1 (0 is IPO_HOLDER)");
     
-    user::User* user2 = runtime.register_strategy(aggressive_buyer_strategy, 75000.0);
+    user::User* user2 = runtime.register_strategy("BTC", aggressive_buyer_strategy, 75000.0);
     assert(user2 != nullptr && "Second strategy registration failed");
     assert(user2->get_user_id() == 2 && "Second user should have ID 2");
     
@@ -105,7 +105,7 @@ void test_user_wrapper_methods() {
     runtime.register_stock("SOL", 200.0, 50.0);
     runtime.process_pending_orders();
     
-    user::User* trader = runtime.register_strategy([](user::User* u) {}, 100000.0);
+    user::User* trader = runtime.register_strategy("SOL", [](user::User* u) {}, 100000.0);
     
     // Test price queries
     double bid = trader->get_best_bid("SOL");
@@ -140,7 +140,7 @@ void test_position_tracking() {
     runtime.register_stock("MSFT", 400.0, 50.0);
     runtime.process_pending_orders();
     
-    user::User* trader = runtime.register_strategy([](user::User* u) {}, 100000.0);
+    user::User* trader = runtime.register_strategy("AAPL", [](user::User* u) {}, 100000.0);
     
     // Buy from both stocks
     trader->submit_limit_order("AAPL", OrderSide::BID, 180.0, 5.0);
@@ -176,7 +176,7 @@ void test_quantum_execution() {
     runtime.register_stock("BTC", 100000.0, 10.0);
     runtime.process_pending_orders();
     
-    user::User* trader = runtime.register_strategy([](user::User* u) {
+    user::User* trader = runtime.register_strategy("BTC", [](user::User* u) {
         std::cout << "  Strategy called for user " << u->get_user_id() << std::endl;
 
         // Simple strategy: buy if we can
@@ -214,9 +214,9 @@ void test_multi_user_interaction() {
     runtime.register_stock("TSLA", 250.0, 100.0);
     runtime.process_pending_orders();
     
-    // Register multiple users
-    user::User* buyer = runtime.register_strategy([](user::User* u) {}, 100000.0);
-    user::User* seller = runtime.register_strategy([](user::User* u) {}, 50000.0);
+    // Register multiple users for this ticker
+    user::User* buyer = runtime.register_strategy("TSLA", [](user::User* u) {}, 100000.0);
+    user::User* seller = runtime.register_strategy("TSLA", [](user::User* u) {}, 50000.0);
     
     std::cout << "✓ Buyer ID: " << buyer->get_user_id() << std::endl;
     std::cout << "✓ Seller ID: " << seller->get_user_id() << std::endl;
@@ -253,7 +253,7 @@ void test_error_handling() {
     runtime.register_stock("NVDA", 500.0, 10.0);
     runtime.process_pending_orders();
     
-    user::User* trader = runtime.register_strategy([](user::User* u) {}, 10000.0);
+    user::User* trader = runtime.register_strategy("NVDA", [](user::User* u) {}, 10000.0);
     
     // Try to sell without owning shares (should fail)
     OrderId result = trader->submit_limit_order("NVDA", OrderSide::ASK, 510.0, 5.0);
@@ -325,15 +325,15 @@ void test_simulate_with_example_file() {
     const std::size_t quantum = 50000;
     auto& runtime = runtime::EngineRuntime::get_instance(1, 1048576 * 16, false, quantum);
 
-    bool success = runtime.simulate(data_path, ticker, 0, 100, 1000000.0);
+    bool success = runtime.simulate(std::string(data_path), std::string(ticker), 0, 100, 1000000.0);
     if (!success) {
         std::cout << "✗ simulate() returned false - skipping (e.g. parser error or stock already registered)" << std::endl;
         return;
     }
 
-    // Register strategies so they run during simulation (on_book_update every quantum)
-    user::User* user_maker = runtime.register_strategy(sim_market_maker, 100000.0);
-    user::User* user_taker = runtime.register_strategy(sim_aggressive_taker, 100000.0);
+    // Register strategies for this ticker so they run during simulation (on_book_update every quantum)
+    user::User* user_maker = runtime.register_strategy(std::string(ticker), sim_market_maker, 100000.0);
+    user::User* user_taker = runtime.register_strategy(std::string(ticker), sim_aggressive_taker, 100000.0);
     std::cout << "Registered 2 strategies (market maker, aggressive taker); quantum=" << quantum << std::endl;
 
     auto start_wall = std::chrono::high_resolution_clock::now();

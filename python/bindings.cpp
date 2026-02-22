@@ -132,7 +132,7 @@ PYBIND11_MODULE(titan_core, m) {
              [](user::User& self, const std::string& ticker, const py::object& side, std::size_t depth) {
                  return self.get_market_depth(ticker, side_from_py(side), depth);
              },
-             py::arg("ticker"), py::arg("side"), py::arg("depth") = 10)
+             py::arg("ticker"), py::arg("side"), py::arg("depth") = 20)
         .def("list_tickers", &user::User::list_tickers)
         
         // Position management
@@ -173,12 +173,18 @@ PYBIND11_MODULE(titan_core, m) {
              py::return_value_policy::reference)
         .def_static("reset_instance", &runtime::EngineRuntime::reset_instance)
         
-        // Stock registration
-        .def("register_stock", &runtime::EngineRuntime::register_stock,
+        // Stock registration (C++ takes std::string&&; bindings take by value and move)
+        .def("register_stock",
+             [](runtime::EngineRuntime& self, std::string ticker, double ipo_price, double ipo_qty, std::size_t capacity) {
+                 return self.register_stock(std::move(ticker), ipo_price, ipo_qty, capacity);
+             },
              py::arg("ticker"), py::arg("ipo_price"), py::arg("ipo_qty"), 
              py::arg("capacity") = 0,
              py::call_guard<py::gil_scoped_release>())
-        .def("unregister_stock", &runtime::EngineRuntime::unregister_stock,
+        .def("unregister_stock",
+             [](runtime::EngineRuntime& self, std::string ticker) {
+                 return self.unregister_stock(std::move(ticker));
+             },
              py::arg("ticker"),
              py::call_guard<py::gil_scoped_release>())
         
@@ -217,7 +223,7 @@ PYBIND11_MODULE(titan_core, m) {
                 const py::object& side, std::size_t depth) {
                  return self.get_market_depth(ticker, side_from_py(side), depth);
              },
-             py::arg("ticker"), py::arg("side"), py::arg("depth") = 10)
+             py::arg("ticker"), py::arg("side"), py::arg("depth") = 20)
         .def("list_tickers", &runtime::EngineRuntime::list_tickers)
         
         // Batch processing
@@ -235,12 +241,17 @@ PYBIND11_MODULE(titan_core, m) {
              py::overload_cast<const std::string&>(&runtime::EngineRuntime::process_pending_orders_async),
              py::arg("ticker"),
              py::call_guard<py::gil_scoped_release>())
-        // Simulation (internal parser loop)
-        .def("simulate", &runtime::EngineRuntime::simulate,
+        // Simulation (internal parser loop; C++ takes std::string&&)
+        .def("simulate",
+             [](runtime::EngineRuntime& self, std::string filepath, std::string ticker,
+                std::size_t target_orders, std::size_t price_sample_size, double shares_outstanding, std::string record_path) {
+                 return self.simulate(std::move(filepath), std::move(ticker), target_orders, price_sample_size, shares_outstanding, std::move(record_path));
+             },
              py::arg("filepath"), py::arg("ticker"),
              py::arg("target_orders") = 0,
              py::arg("price_sample_size") = 10,
              py::arg("shares_outstanding") = 1000000.0,
+             py::arg("record_path") = "",
              py::call_guard<py::gil_scoped_release>())
         .def("is_simulation_running", &runtime::EngineRuntime::is_simulation_running, py::arg("ticker"))
         .def("get_simulation_metrics", &runtime::EngineRuntime::get_simulation_metrics, py::arg("ticker"))
@@ -255,6 +266,17 @@ PYBIND11_MODULE(titan_core, m) {
         .def("get_quantum", &runtime::EngineRuntime::get_quantum)
         .def("set_notify_order", &runtime::EngineRuntime::set_notify_order, py::arg("enable"))
         .def("get_notify_order", &runtime::EngineRuntime::get_notify_order)
+        .def("set_record",
+             [](runtime::EngineRuntime& self, std::string ticker, bool enable) {
+                 self.set_record(std::move(ticker), enable);
+             },
+             py::arg("ticker"), py::arg("enable"))
+        .def("set_record",
+             [](runtime::EngineRuntime& self, std::string ticker, bool enable, std::string path_override) {
+                 self.set_record(std::move(ticker), enable, std::move(path_override));
+             },
+             py::arg("ticker"), py::arg("enable"), py::arg("path_override"))
+        .def("get_record", &runtime::EngineRuntime::get_record, py::arg("ticker"))
         
         // Statistics
         .def("get_placed_count", &runtime::EngineRuntime::get_placed_count, py::arg("ticker"))
@@ -284,9 +306,9 @@ PYBIND11_MODULE(titan_core, m) {
         .def("unregister_strategy", &runtime::EngineRuntime::unregister_strategy,
              py::arg("user_id"))
 
-        // Strategy registration
+        // Strategy registration (ticker required for deterministic per-engine quantum; C++ takes std::string&&)
         .def("register_strategy",
-             [](runtime::EngineRuntime& self, py::function py_strategy, double starting_capital) 
+             [](runtime::EngineRuntime& self, std::string ticker, py::function py_strategy, double starting_capital) 
              -> user::User* {
                  // Wrap Python function in C++ lambda with GIL acquisition
                  user::Strategy cpp_strategy = [py_strategy](user::User* user) {
@@ -297,9 +319,9 @@ PYBIND11_MODULE(titan_core, m) {
                          std::cerr << "Python strategy error: " << e.what() << "\n";
                      }
                  };
-                 return self.register_strategy(std::move(cpp_strategy), starting_capital);
+                 return self.register_strategy(std::move(ticker), std::move(cpp_strategy), starting_capital);
              },
-             py::arg("strategy"), py::arg("starting_capital") = 100000.0,
+             py::arg("ticker"), py::arg("strategy"), py::arg("starting_capital") = 100000.0,
              py::return_value_policy::reference);
 
     // --- SimulationMetrics (read-only struct for get_simulation_metrics) ---

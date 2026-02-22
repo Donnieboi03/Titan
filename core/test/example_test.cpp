@@ -84,8 +84,8 @@ int main(int argc, char** argv)
         }
     };
 
-    // Register the strategy as a user and give it some starting capital
-    backtest::user::User* trader = runtime.register_strategy(complex_strategy);
+    // Register the strategy for EXM (it can still trade ACME via the User API)
+    backtest::user::User* trader = runtime.register_strategy("EXM", complex_strategy);
     if (!trader) {
         std::cerr << "Failed to register strategy/user" << std::endl;
         return 1;

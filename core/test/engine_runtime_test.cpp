@@ -494,7 +494,7 @@ void test_multi_stock_stress() {
     // Register multiple stocks
     std::vector<std::string> tickers = {"AAPL", "GOOGL", "MSFT", "AMZN", "TSLA", "META", "NVDA", "AMD"};
     for (int i = 0; i < NUM_STOCKS; ++i) {
-        bool success = runtime.register_stock(tickers[i], 100.0 + i * 10, 100000.0);
+        bool success = runtime.register_stock(std::string(tickers[i]), 100.0 + i * 10, 100000.0);
         assert(success);
     }
     std::cout << "✓ Registered " << NUM_STOCKS << " stocks" << std::endl;
@@ -589,7 +589,7 @@ void test_accumulate_drain_runtime()
     const std::size_t NUM_ORDERS = 1000000; // adjust for CI
     const std::size_t CAPACITY = 1024 * 1024;
 
-    bool ok = runtime.register_stock(ticker, 100.0, 1000.0, CAPACITY);
+    bool ok = runtime.register_stock(std::string(ticker), 100.0, 1000.0, CAPACITY);
     assert(ok && "register_stock should succeed");
 
     // Ensure auto-match is off on engine prior to submissions
@@ -695,7 +695,7 @@ void test_notifications() {
     // Process all pending orders
     runtime.process_pending_orders();
     
-    // Give notification thread time to process messages
+    // Give event management thread time to process messages
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     
     std::cout << "✓ Notification system processed all events" << std::endl;
@@ -705,7 +705,7 @@ void test_notifications() {
     bool unregistered = runtime.unregister_stock("NOTIFY_TEST");
     assert(unregistered);
     
-    // Give notification thread time to process final messages
+    // Give event management thread time to process final messages
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     
     std::cout << "✓ Notification system test completed" << std::endl;
@@ -770,8 +770,8 @@ void test_simulate_throughput() {
     try {
         // Start async simulation (note: it will register the stock internally)
         bool success = runtime.simulate(
-            data_path,
-            TICKER,
+            std::string(data_path),
+            std::string(TICKER),
             0,  // Process entire file (parser may have internal limits)
             100, // price sample size
             1000000.0 // shares outstanding

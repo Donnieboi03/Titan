@@ -287,8 +287,8 @@ Total RAM = num_stocks × capacity × 32 bytes
 4. **Capacity Planning:** Set capacity = 2x expected concurrent open orders
 5. **Thread Count:** **Use 8 workers** for maximum throughput (false sharing fixed)
 6. **Memory:** 1M capacity per stock = ~32 MB per engine (256 MB total for 8 stocks)
-7. **Disable Verbose:** Set verbose=false to eliminate notification overhead
-8. **Cache-Line Alignment:** Ensure CACHE_LINE=128 on M1/M2 (already configured)
+7. **Disable Verbose:** Set verbose=false to eliminate event management overhead
+8. **Cache-Line Alignment:** See [Optimizing for Your System](#optimizing-for-your-system) below.
 
 ### Optimal Configuration
 ```cpp
@@ -313,11 +313,30 @@ for (const auto& ticker : tickers) {
 - **Latency**: ~128 μs per order (end-to-end)
 
 ### For Further Development
-1. **Reduce notification contention:** e.g. sleep lock for notification thread
+1. **Reduce event management contention:** e.g. sleep lock for event management thread
 2. **Auto-match toggle:** integrate lazy queue / pending order state as needed
 3. **Consider SIMD:** vectorize matching logic (Highway is available in stack)
 4. **Add telemetry:** real-time performance monitoring
 5. **Benchmark on Intel/AMD:** verify cross-architecture performance
+
+### Optimizing for Your System
+
+The engine uses cache-line alignment to avoid false sharing between threads. The alignment size is configurable via `engine::CACHE_LINE` in `core/engine_types.h`:
+
+```cpp
+constexpr std::size_t CACHE_LINE = 128;  // Default: M1/M2 (Apple Silicon)
+```
+
+**To optimize for your CPU:**
+
+| CPU / Platform      | Typical cache line size | Set `CACHE_LINE` to |
+|---------------------|-------------------------|---------------------|
+| Apple M1/M2/M3      | 128 bytes               | 128 (default)       |
+| Intel x86-64        | 64 bytes                | 64                  |
+| AMD Zen             | 64 bytes                | 64                  |
+| ARM (most)          | 64 bytes                | 64                  |
+
+Edit `core/engine_types.h` and change the `CACHE_LINE` value to match your system's cache line size. Mismatched values may hurt performance due to false sharing or wasted padding. After changing, rebuild the extension: `pip install -e .`
 
 ---
 

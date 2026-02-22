@@ -1,10 +1,6 @@
 #ifndef ORDER_ENGINE_H
 #define ORDER_ENGINE_H
 
-#ifndef CACHE_LINE
-#define CACHE_LINE 128
-#endif
-
 #include "engine_types.h"
 #include <vector>
 #include <atomic>
@@ -84,10 +80,10 @@ namespace engine
         std::unordered_map<Price, Quantity> ask_depth_cache_;
 
         MarketSnapshot snapshots_[2];
-        alignas(CACHE_LINE) std::atomic<const MarketSnapshot*> published_snapshot_ptr_;
-        alignas(CACHE_LINE) std::atomic<std::size_t> active_snapshot_;
+        alignas(engine::CACHE_LINE) std::atomic<const MarketSnapshot*> published_snapshot_ptr_;
+        alignas(engine::CACHE_LINE) std::atomic<std::size_t> active_snapshot_;
 
-        alignas(CACHE_LINE) std::size_t placed_count_;
+        alignas(engine::CACHE_LINE) std::size_t placed_count_;
         std::size_t cancelled_count_;
         std::size_t filled_count_;
         Price last_trade_price_;

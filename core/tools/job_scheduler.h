@@ -87,7 +87,7 @@ namespace scheduler
 
         bool all_queues_finished() const noexcept;
 
-        struct alignas(CACHE_LINE) AlignedAtomicBool 
+        struct alignas(engine::CACHE_LINE) AlignedAtomicBool 
         { 
             std::atomic<bool> v; 
             AlignedAtomicBool() noexcept : v{true} {} 
@@ -98,7 +98,7 @@ namespace scheduler
         std::vector<std::thread> workers_; // Worker Threads
 
         // Producer / Consumer atomic's
-        alignas(CACHE_LINE) std::atomic<bool> running_{true};
+        alignas(engine::CACHE_LINE) std::atomic<bool> running_{true};
         std::unique_ptr<AlignedAtomicBool[]> finished_last_job_;
 
         std::vector<JobQueue> job_queues_; // Queue for jobs

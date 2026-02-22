@@ -1,15 +1,13 @@
 #pragma once
 
-#include <vector>
+#include "../engine_types.h"
 #include <atomic>
 #include <algorithm>
 #include <thread>
-
-// Cache Line Size for M3 Mac Pro
-#define CACHE_LINE 128
+#include <vector>
 
 template <typename T>
-class alignas(CACHE_LINE) DoubleBuffer
+class alignas(engine::CACHE_LINE) DoubleBuffer
 {
 public:
     explicit DoubleBuffer(std::size_t capacity) noexcept;
@@ -41,7 +39,7 @@ private:
     const std::size_t capacity_; // Buffer Capacity
 
     // Consumer Touchable Producer-only state (writer thread) - grouped on one cache line
-    struct alignas(CACHE_LINE) ProducerState 
+    struct alignas(engine::CACHE_LINE) ProducerState 
     {
         std::atomic<std::size_t> write_index{0};
         std::atomic<std::vector<T>*> write_buffer{nullptr};
@@ -49,7 +47,7 @@ private:
     } producer_;
 
     // Producer Touchable Consumer-only state (reader thread) - grouped on another cache line
-    struct alignas(CACHE_LINE) ConsumerState 
+    struct alignas(engine::CACHE_LINE) ConsumerState 
     {
         std::atomic<std::size_t> read_index{0};
         std::atomic<std::size_t> read_size{0};

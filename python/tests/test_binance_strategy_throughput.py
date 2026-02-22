@@ -70,7 +70,7 @@ def make_strategy(state_dict):
     return strategy
 
 print("2) Registering Python strategy (called by C++ threads)...")
-runtime.register_strategy(make_strategy(state), starting_capital=1_000_000.0)
+runtime.register_strategy(TICKER, make_strategy(state), starting_capital=1_000_000.0)
 
 print("3) Running C++-driven simulation (no Python parser.next calls)...")
 print(f"   • Using data file: {DATA_FILE}")

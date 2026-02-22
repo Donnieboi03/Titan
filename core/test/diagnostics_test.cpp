@@ -17,10 +17,10 @@ void test_diagnostics() {
     
     // Register stock
     std::string ticker = "AAPL";
-    runtime.register_stock(ticker, 150.0, 1000.0);
+    runtime.register_stock(std::string(ticker), 150.0, 1000.0);
     
-    // Register strategy with capital
-    User* trader = runtime.register_strategy([](User* user) {
+    // Register strategy with capital for this ticker
+    User* trader = runtime.register_strategy(std::string(ticker), [](User* user) {
         auto tickers = user->list_tickers();
         for (const auto& t : tickers) {
             double bid = user->get_best_bid(t);

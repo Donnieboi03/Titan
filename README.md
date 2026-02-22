@@ -93,8 +93,22 @@ Step 3 compiles the C++ core and creates the `titan` Python package. No separate
 
 ```bash
 python -c "import titan; print(titan.__version__)"
-# Expected: 2.1.0
+# Expected: 1.0.0
 ```
+
+**🐳 Docker (alternative)**
+
+If you prefer not to install system libraries (Highway, zlib, compiler) locally, you can build and run Titan in a container. The image includes all build and runtime dependencies.
+
+```bash
+# From repo root
+docker build -t titan .
+docker run -it titan python -c "import titan; print(titan.__version__)"
+# Or open a shell to run scripts:
+docker run -it titan bash
+```
+
+See the [Installation guide](docs/installation.md#docker) for details and options.
 
 **🧪 Run Python tests (optional)**
 

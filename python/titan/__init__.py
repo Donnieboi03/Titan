@@ -7,6 +7,8 @@ trading strategies against historical Level-2 order book data.
 
 __version__ = "2.1.0"
 
+import atexit
+
 # Import C++ extension module (will be built by pybind11)
 try:
     from .titan_core import (
@@ -25,6 +27,8 @@ try:
         IPO_HOLDER,
         INVALID_ORDER_ID,
     )
+    # Ensure runtime is torn down (and buffers flushed) when process exits
+    atexit.register(EngineRuntime.reset_instance)
 except ImportError as e:
     import sys
     print(f"Warning: C++ extension module not found. Please build the extension.", file=sys.stderr)

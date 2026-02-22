@@ -133,11 +133,11 @@ void test_strategy_with_real_data(const std::string& data_file, const std::strin
     std::cout << "Event Limit: " << MAX_EVENTS << "\n\n";
     
     // Register stock with reasonable IPO quantity (1 BTC worth)
-    runtime.register_stock(ticker, initial_price, 1.0);
+    runtime.register_stock(std::string(ticker), initial_price, 1.0);
     
-    // Register strategies
-    User* maker = runtime.register_strategy(market_maker_strategy, 100000.0);
-    User* taker = runtime.register_strategy(aggressive_taker_strategy, 100000.0);
+    // Register strategies for this ticker
+    User* maker = runtime.register_strategy(std::string(ticker), market_maker_strategy, 100000.0);
+    User* taker = runtime.register_strategy(std::string(ticker), aggressive_taker_strategy, 100000.0);
     
     std::cout << "Market Maker (User " << maker->get_user_id() << "): $" << maker->get_capital() << " capital\n";
     std::cout << "Aggressive Taker (User " << taker->get_user_id() << "): $" << taker->get_capital() << " capital\n\n";

@@ -45,6 +45,17 @@ def test_basic_functionality():
     success = runtime.register_stock("AAPL", 150.0, 1000.0)
     print(f"✓ Registered AAPL: {success}")
 
+    # Per-ticker recording API
+    assert runtime.get_record("AAPL") is False
+    runtime.set_record("AAPL", True)
+    assert runtime.get_record("AAPL") is True
+    runtime.set_record("AAPL", False)
+    assert runtime.get_record("AAPL") is False
+    runtime.set_record("AAPL", True, "custom_recording.csv")
+    assert runtime.get_record("AAPL") is True
+    runtime.set_record("AAPL", False)
+    print("✓ set_record / get_record")
+
     # Check tickers
     tickers = runtime.list_tickers()
     print(f"✓ Listed tickers: {tickers}")
@@ -94,8 +105,9 @@ def test_strategy_registration():
                 user.submit_limit_order(ticker, "BID", mid - 1.0, 10.0)
                 user.submit_limit_order(ticker, "ASK", mid + 1.0, 10.0)
 
-    # Register strategy
-    trader = runtime.register_strategy(my_strategy, starting_capital=50000.0)
+    # Register strategy for this ticker
+    trader = runtime.register_strategy("TSLA", my_strategy, starting_capital=50000.0)
+    assert trader is not None, "register_strategy should return a User when ticker exists"
     print(f"✓ Registered strategy, User ID: {trader.get_user_id()}")
     print(f"✓ Starting capital: ${trader.get_capital():.2f}")
 
@@ -191,7 +203,7 @@ def test_order_management():
             user.submit_limit_order(ticker, "BID", mid - 2.0, 5.0)
             user.submit_limit_order(ticker, "ASK", mid + 2.0, 5.0)
 
-    manager = runtime.register_strategy(order_manager, 100000.0)
+    manager = runtime.register_strategy("SPY", order_manager, 100000.0)
     print(f"✓ Registered order manager, User ID: {manager.get_user_id()}")
 
     # Create market

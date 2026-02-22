@@ -122,8 +122,8 @@ namespace backtest
             engine::Quantity ipo_shares_; // Initial IPO
             
             // Cache-line aligned to prevent false sharing
-            alignas(CACHE_LINE) SimulationMetrics sim_metrics_[2];  // Double-buffered simulation metrics
-            alignas(CACHE_LINE) std::atomic<int> sim_metrics_index_{0};  // 0 or 1, which buffer readers see
+            alignas(engine::CACHE_LINE) SimulationMetrics sim_metrics_[2];  // Double-buffered simulation metrics
+            alignas(engine::CACHE_LINE) std::atomic<int> sim_metrics_index_{0};  // 0 or 1, which buffer readers see
             
             
             // Default Constructor

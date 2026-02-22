@@ -253,7 +253,9 @@ class EngineRuntime:
 
     @staticmethod
     def reset_instance() -> None:
-        """Destroy the singleton and free all engines. Call before get_instance() in tests."""
+        """Destroy the singleton and free all engines. Call before get_instance() in tests.
+        Registered with atexit so the runtime is torn down (and log/record buffers flushed)
+        when the process exits."""
         ...
 
     # --- Stock registration ---
@@ -384,6 +386,7 @@ class EngineRuntime:
         target_orders: int = 0,
         price_sample_size: int = 10,
         shares_outstanding: float = 1000000.0,
+        record_path: str = "",
     ) -> bool:
         """
         Start an async simulation by streaming a data file through the C++ engine.
@@ -398,6 +401,7 @@ class EngineRuntime:
             target_orders: Stop after this many orders placed (0 = full file).
             price_sample_size: Number of data points to sample for IPO price.
             shares_outstanding: Total shares for IPO registration.
+            record_path: If non-empty, record L2 updates to this file during simulation.
         Returns:
             True if simulation started successfully, False on error.
         """
@@ -438,6 +442,29 @@ class EngineRuntime:
         """Return True if order-fill notifications are currently enabled."""
         ...
 
+    @overload
+    def set_record(self, ticker: str, enable: bool) -> None:
+        """
+        Enable or disable per-ticker L2 recording for simulate().
+        When enabled, L2 updates for this ticker are written to {ticker}.csv by the event management thread.
+        Use set_record(ticker, enable, path_override) to specify a custom output path.
+        """
+        ...
+
+    @overload
+    def set_record(self, ticker: str, enable: bool, path_override: str) -> None:
+        """
+        Enable or disable per-ticker L2 recording with a custom output file path.
+        When enable=True, recordings go to path_override instead of the default {ticker}.csv.
+        """
+        ...
+
+    def set_record(self, ticker: str, enable: bool, path_override: str = "") -> None: ...
+
+    def get_record(self, ticker: str) -> bool:
+        """Return True if L2 recording is enabled for the given ticker."""
+        ...
+
     # --- Statistics ---
     def get_placed_count(self, ticker: str) -> int:
         """Return total orders placed on ticker since registration."""
@@ -469,16 +496,22 @@ class EngineRuntime:
     # --- Strategy management ---
     def register_strategy(
         self,
+        ticker: str,
         strategy: Callable[[User], None],
         starting_capital: float = 100000.0,
     ) -> User:
         """
-        Register a Python strategy function as a trading agent.
+        Register a Python strategy function as a trading agent for the given ticker.
 
-        The strategy callable is invoked by C++ worker threads on every quantum.
-        The GIL is re-acquired before calling into Python.
+        The strategy is bound to the given ticker. Its callable is invoked by C++
+        worker threads on that ticker's quantum only (every N orders on that ticker),
+        ensuring deterministic execution order. The GIL is re-acquired before calling
+        into Python.
 
         Args:
+            ticker: Stock ticker this strategy is registered for (must already be
+                registered via register_stock). The strategy callback runs when
+                this ticker's per-engine quantum is reached.
             strategy: Callable receiving a ``User`` handle. Example::
 
                 def my_strategy(user: titan.User) -> None:
@@ -487,7 +520,7 @@ class EngineRuntime:
 
             starting_capital: Initial cash balance in dollars.
         Returns:
-            User handle for inspecting positions and PnL.
+            User handle for inspecting positions and PnL, or None if ticker not found.
         """
         ...
 

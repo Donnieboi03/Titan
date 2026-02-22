@@ -1,7 +1,9 @@
 #include "engine_runtime.h"
 #include "market_data_stream.h"
+#include <algorithm>
 #include <functional>
-#include <mutex>
+#include <chrono>
+#include <utility>
 
 // File-scope pointer so both get_instance() and reset_instance() can manage lifetime.
 static backtest::runtime::EngineRuntime* s_instance_ptr = nullptr;
@@ -27,7 +29,7 @@ void backtest::runtime::EngineRuntime::reset_instance()
     try
     {
         s_instance_ptr->scheduler_.process_jobs();
-        s_instance_ptr->stop_notification_thread();
+        s_instance_ptr->stop_event_management_thread();
 
         // Clear all runtime state
         s_instance_ptr->engines_info_.clear();
@@ -36,6 +38,10 @@ void backtest::runtime::EngineRuntime::reset_instance()
         s_instance_ptr->order_to_user_.clear();
         s_instance_ptr->snapshot_cache_.clear();
         s_instance_ptr->users_.clear();
+        s_instance_ptr->users_per_engine_.clear();
+        s_instance_ptr->user_strategy_engine_id_.clear();
+        s_instance_ptr->record_enabled_.clear();
+        s_instance_ptr->record_path_override_.clear();
 
         instance_initialized_ = false;
 
@@ -50,11 +56,11 @@ void backtest::runtime::EngineRuntime::reset_instance()
     }
 }
 
-bool backtest::runtime::EngineRuntime::register_stock(const std::string& _ticker, double _ipo_price, double _ipo_qty, std::size_t capacity)
+bool backtest::runtime::EngineRuntime::register_stock(std::string&& ticker, double _ipo_price, double _ipo_qty, std::size_t capacity)
 {
     try {
         // Verify ticker before creating engine
-        if (_ticker.empty()) 
+        if (ticker.empty()) 
         {
             notify("[REGISTER] ERROR: Empty ticker provided");
             return false;
@@ -62,14 +68,14 @@ bool backtest::runtime::EngineRuntime::register_stock(const std::string& _ticker
         // IF ipo price or qty is less than or equal to 0
         if (_ipo_price <= 0.0 || _ipo_qty <= 0.0) 
         {
-            notify("[REGISTER] ERROR: IPO Price/Quantity must be > 0 for " + _ticker);
+            notify("[REGISTER] ERROR: IPO Price/Quantity must be > 0 for " + ticker);
             return false;
         }
         
         // If ticker is already in Exchange then error
-        if (ticker_to_engine_id_.find(_ticker) != ticker_to_engine_id_.end()) 
+        if (ticker_to_engine_id_.find(ticker) != ticker_to_engine_id_.end()) 
         {
-            notify("[REGISTER] ERROR: Stock " + _ticker + " already exists");
+            notify("[REGISTER] ERROR: Stock " + ticker + " already exists");
             return false;
         }
         
@@ -92,10 +98,8 @@ bool backtest::runtime::EngineRuntime::register_stock(const std::string& _ticker
 
         // Add OrderEngineInfo to engines vector
         engines_info_.emplace_back(engine_capacity, verbose_, ipo_qty_ticks, engine_id % num_workers_, engine_id);
-        engines_info_[engine_id].ticker_ = _ticker;
-        
-        // Add ticker to engine_id mapping
-        ticker_to_engine_id_[_ticker] = engine_id;
+        auto it = ticker_to_engine_id_.emplace(std::forward<std::string>(ticker), engine_id).first;
+        engines_info_[engine_id].ticker_ = it->first;
         
         // Expand snapshot cache if needed and cache snapshot pointer
         if (snapshot_cache_.size() <= engine_id) {
@@ -110,7 +114,16 @@ bool backtest::runtime::EngineRuntime::register_stock(const std::string& _ticker
                 user_engines.resize(engine_id + 1);
             }
         }
-        
+
+        // Grow per-engine recording state and per-engine strategy list
+        while (record_enabled_.size() <= engine_id) {
+            record_enabled_.push_back(std::make_unique<std::atomic<bool>>(false));
+            record_path_override_.push_back({});
+        }
+        while (users_per_engine_.size() <= engine_id) {
+            users_per_engine_.push_back({});
+        }
+
         // Place initial sell at IPO Price and IPO Quantity (from IPO holder)
         engine::OrderId ipo_order;
         if (users_.empty()) {
@@ -121,10 +134,10 @@ bool backtest::runtime::EngineRuntime::register_stock(const std::string& _ticker
             for (const auto& msg : msgs) {
                 switch (msg.kind) {
                     case engine::EventKind::ACCEPT:
-                        notify("[IPO] Order " + std::to_string(ipo_order) + " accepted for " + _ticker);
+                        notify("[IPO] Order " + std::to_string(ipo_order) + " accepted for " + it->first);
                         break;
                     case engine::EventKind::REJECT:
-                        notify("[IPO] Order " + std::to_string(ipo_order) + " rejected for " + _ticker);
+                        notify("[IPO] Order " + std::to_string(ipo_order) + " rejected for " + it->first);
                         break;
                     default:
                         break;
@@ -146,50 +159,70 @@ bool backtest::runtime::EngineRuntime::register_stock(const std::string& _ticker
         // Reverse map entry for IPO
         order_to_user_[ipo_order] = backtest::user::IPO_HOLDER;
         
-        notify("[REGISTER] Registered " + _ticker + " with IPO: " + 
+        notify("[REGISTER] Registered " + it->first + " with IPO: " + 
             std::to_string(_ipo_qty) + " shares @ $" + std::to_string(_ipo_price) + 
             " (owned by user " + std::to_string(backtest::user::IPO_HOLDER) + ")");
         
         return true;
     } catch(const std::exception& e) {
-        notify("[REGISTER] ERROR for " + _ticker + ": " + e.what());
+        notify("[REGISTER] ERROR: " + std::string(e.what()));
         return false;
     }
 }
 
-bool backtest::runtime::EngineRuntime::unregister_stock(const std::string& _ticker)
+bool backtest::runtime::EngineRuntime::unregister_stock(std::string&& ticker)
 {
     try
     {
         // Verify ticker before processing
-        if (_ticker.empty()) 
+        if (ticker.empty()) 
         {
             notify("[UNREGISTER] ERROR: Empty ticker provided");
             return false;
         }
         
         // Find the ticker-to-engine mapping
-        auto ticker_it = ticker_to_engine_id_.find(_ticker);
+        auto ticker_it = ticker_to_engine_id_.find(ticker);
         if (ticker_it == ticker_to_engine_id_.end()) 
         {
-            notify("[UNREGISTER] ERROR: Stock " + _ticker + " does not exist");
+            notify("[UNREGISTER] ERROR: Stock " + ticker + " does not exist");
             return false;
         }
         
         EngineId engine_id = ticker_it->second;
         if (engine_id >= engines_info_.size()) 
         {
-            notify("[UNREGISTER] ERROR: Engine not found for " + _ticker);
+            notify("[UNREGISTER] ERROR: Engine not found for " + ticker);
             return false;
         }
 
+        // Unregister all strategies associated with this ticker (iterate over a copy)
+        if (engine_id < users_per_engine_.size())
+        {
+            std::vector<std::size_t> indices = users_per_engine_[engine_id];
+            for (std::size_t idx : indices)
+            {
+                if (idx < users_.size())
+                {
+                    backtest::user::UserId uid = users_[idx].get_user_id();
+                    if (uid != backtest::user::INVALID_USER_ID)
+                        unregister_strategy(uid);
+                }
+            }
+        }
+
         auto& engine_info = engines_info_[engine_id];
+
+        if (engine_id < record_enabled_.size() && record_enabled_[engine_id]) {
+            record_enabled_[engine_id]->store(false, std::memory_order_relaxed);
+        }
 
         // Wait for worker to finish batch
         scheduler_.process_jobs_on(engine_info.worker_id_);
         
         // Remove from ticker map (engine stays in vector to preserve indices)
-        ticker_to_engine_id_.erase(_ticker);
+        std::string unreg_ticker = ticker_it->first;
+        ticker_to_engine_id_.erase(ticker_it);
         
         // Clear snapshot cache entry
         if (engine_id < snapshot_cache_.size()) {
@@ -208,13 +241,13 @@ bool backtest::runtime::EngineRuntime::unregister_stock(const std::string& _tick
             }
         }
         
-        notify("[UNREGISTER] Unregistered " + _ticker);
+        notify("[UNREGISTER] Unregistered " + unreg_ticker);
         
         return true;
     }
     catch(const std::exception& e)
     {
-        notify("[UNREGISTER] ERROR for " + _ticker + ": " + e.what());
+        notify("[UNREGISTER] ERROR: " + std::string(e.what()));
         return false;
     }
 }
@@ -1364,18 +1397,19 @@ void backtest::runtime::EngineRuntime::process_pending_orders_async(const std::s
 
 bool backtest::runtime::EngineRuntime::simulate
 (
-    const std::string& filepath, // Path for Market Data
-    const std::string& ticker, // Name of Market
-    std::size_t target_orders, // Limit for Orders
-    std::size_t price_sample_size, // IPO Price Sample Size
-    double shares_outstanding // IPO Shares
+    std::string&& filepath,
+    std::string&& ticker,
+    std::size_t target_orders,
+    std::size_t price_sample_size,
+    double shares_outstanding,
+    std::string&& record_path
 )
 {   
     std::unique_ptr<stream::L2Stream> parser; // L2 stream for replay
     double initial_price = 100.0;  // IPO Price
     try 
     {
-        parser = std::make_unique<stream::L2Stream>(filepath);
+        parser = std::make_unique<stream::L2Stream>(std::forward<std::string>(filepath));
         // Test parser through IPO setup
         stream::L2Update ipo_update;
         double sample_sum = 0.0;
@@ -1397,8 +1431,9 @@ bool backtest::runtime::EngineRuntime::simulate
         return false; // Parser Failed
     }
     
-    // Register Stock
-    if(!register_stock(ticker, initial_price, shares_outstanding)) return false;
+    // Register Stock (pass copy of ticker so we keep it for engine_id lookup below)
+    if(!register_stock(std::string(ticker), initial_price, shares_outstanding)) return false;
+    if (!record_path.empty()) set_record(std::string(ticker), true, std::forward<std::string>(record_path));
     auto engine_id = ticker_to_engine_id_[ticker]; // Engine Id
     auto& engine_info = engines_info_[engine_id]; // Engine Info
     engine_info.get_write_metrics().reset(); // Info Sim Metrics
@@ -1833,12 +1868,28 @@ bool backtest::runtime::EngineRuntime::order_exists(const std::string& ticker, e
     }
 }
 
-backtest::user::User* backtest::runtime::EngineRuntime::register_strategy(backtest::user::Strategy strategy, double starting_capital)
+backtest::user::User* backtest::runtime::EngineRuntime::register_strategy(std::string&& ticker, backtest::user::Strategy strategy, double starting_capital)
 {
     if (!strategy)
     {
         throw std::invalid_argument("Cannot register null strategy");
     }
+
+    auto ticker_it = ticker_to_engine_id_.find(ticker);
+    if (ticker_it == ticker_to_engine_id_.end())
+    {
+        if (verbose_) notify("[RUNTIME] ERROR: Cannot register strategy — ticker not found: " + ticker);
+        return nullptr;
+    }
+    EngineId engine_id = ticker_it->second;
+    if (engine_id >= engines_info_.size())
+    {
+        if (verbose_) notify("[RUNTIME] ERROR: Cannot register strategy — engine not found for " + ticker);
+        return nullptr;
+    }
+
+    while (users_per_engine_.size() <= engine_id)
+        users_per_engine_.push_back({});
 
     backtest::user::UserId user_id = 0;
     std::size_t idx = 0;
@@ -1862,17 +1913,24 @@ backtest::user::User* backtest::runtime::EngineRuntime::register_strategy(backte
         user_id = static_cast<backtest::user::UserId>(users_.size() + 1);
         idx = users_.size();
         users_.emplace_back(std::move(strategy), this, user_id, starting_capital, &sync_order_api_);
+        user_strategy_engine_id_.push_back(engine_id);
     }
     else
     {
         // Fill the hole: construct User in place at users_[idx]
         users_[idx] = backtest::user::User(std::move(strategy), this, user_id, starting_capital, &sync_order_api_);
+        if (idx < user_strategy_engine_id_.size())
+            user_strategy_engine_id_[idx] = engine_id;
+        else
+            user_strategy_engine_id_.resize(idx + 1, engine_id);
     }
+
+    users_per_engine_[engine_id].push_back(idx);
 
     if (verbose_)
     {
         notify("[RUNTIME] Registered strategy for user " + std::to_string(user_id) +
-                " with capital $" + std::to_string(starting_capital));
+                " on " + ticker + " with capital $" + std::to_string(starting_capital));
     }
 
     // Ensure user_orders_ has space for this user and per-engine entries
@@ -1903,6 +1961,19 @@ bool backtest::runtime::EngineRuntime::unregister_strategy(backtest::user::UserI
     const std::size_t idx = user_id - 1;
     if (users_[idx].get_user_id() == backtest::user::INVALID_USER_ID)
         return false; // already unregistered
+
+    // Remove this user's index from users_per_engine_[strategy_engine_id]
+    EngineId strategy_engine_id = (idx < user_strategy_engine_id_.size()) ? user_strategy_engine_id_[idx] : 0;
+    if (strategy_engine_id < users_per_engine_.size())
+    {
+        std::vector<std::size_t>& per_engine = users_per_engine_[strategy_engine_id];
+        auto it = std::find(per_engine.begin(), per_engine.end(), idx);
+        if (it != per_engine.end())
+        {
+            *it = per_engine.back();
+            per_engine.pop_back();
+        }
+    }
 
     // Remove all of this user's orders from order_to_user_
     if (user_id < user_orders_.size())
@@ -2009,8 +2080,8 @@ backtest::runtime::EngineRuntime::EngineRuntime(std::size_t num_threads, std::si
     default_capacity_(default_capacity),
     verbose_(_verbose),
     quantum_orders_(quantum_orders),
-    global_orders_since_quantum_(0),
-    notification_buffer_(1000),
+    log_buffer_(LOG_BUFFER_CAPACITY),
+    record_buffer_(RECORD_BUFFER_CAPACITY),
     sync_order_api_(this)
 {
     // Initialize runtime batch size to scheduler's batch capacity by default
@@ -2029,76 +2100,166 @@ backtest::runtime::EngineRuntime::EngineRuntime(std::size_t num_threads, std::si
         std::cout << "[RUNTIME] Starting EngineRuntime with " << num_threads
                 << " workers, capacity " << default_capacity << std::endl;
 
-    if (verbose_)
-    {
-        start_notification_thread();
-    }
+    start_event_management_thread();
 }
 
 backtest::runtime::EngineRuntime::~EngineRuntime()
 {
-    if (notification_thread_running_) 
+    if (event_management_thread_running_) 
     {
-        stop_notification_thread();
+        stop_event_management_thread();
     }
 }
 
-void backtest::runtime::EngineRuntime::start_notification_thread() noexcept
+void backtest::runtime::EngineRuntime::start_event_management_thread() noexcept
 {
-    if (verbose_ && !notification_thread_running_) 
+    if (!event_management_thread_running_.exchange(true)) 
     {
-        notification_thread_running_ = true;
-        notification_thread_ = std::thread(&EngineRuntime::notification_loop, this);
+        event_management_thread_ = std::thread(&EngineRuntime::event_management_loop, this);
     }
 }
 
-void backtest::runtime::EngineRuntime::stop_notification_thread() noexcept
+void backtest::runtime::EngineRuntime::stop_event_management_thread() noexcept
 {
-    notification_thread_running_ = false;
-    // Wake notification thread so it can exit promptly
-    notification_cv_.notify_one();
-    if (notification_thread_.joinable()) 
+    // Flush producer buffers so event thread can drain any pending log/record data
+    log_buffer_.try_flush();
+    record_buffer_.try_flush();
+    // Wait for event thread to drain (JobScheduler pattern)
+    while (record_buffer_.pending_reads() > 0 || log_buffer_.pending_reads() > 0)
+        std::this_thread::yield();
+    event_management_thread_running_.store(false);
+    if (event_management_thread_.joinable()) 
     {
-        notification_thread_.join();
+        event_management_thread_.join();
     }
-}
-
-void backtest::runtime::EngineRuntime::notification_loop() noexcept
-{
-    std::unique_lock<std::mutex> lock(notification_mutex_);
-    while (notification_thread_running_) 
+    // Flush and close all open record streams (event management thread is stopped)
+    for (auto& kv : record_streams_) 
     {
-        // Wait until there is a message or the thread is asked to stop
-        notification_cv_.wait(lock, [this]() {
-            return !notification_buffer_.empty() || !notification_thread_running_;
-        });
-
-        // Drain available messages
-        while (!notification_buffer_.empty()) {
-            std::string message = notification_buffer_.front();
-            notification_buffer_.pop();
-            // Unlock while performing IO to avoid blocking producers
-            lock.unlock();
-            std::cout << message << std::endl;
-            lock.lock();
+        if (kv.second) {
+            kv.second->flush();
         }
     }
+    record_streams_.clear();
 }
 
-void backtest::runtime::EngineRuntime::notify(const std::string& message) noexcept
+void backtest::runtime::EngineRuntime::event_management_loop() noexcept
 {
-    if (verbose_ && notification_thread_running_) 
+    while (event_management_thread_running_.load(std::memory_order_acquire)) 
     {
+        bool did_work = false;
+
+        // Drain record buffer first (lazy-open L2Stream per engine_id, write updates)
+        RecordItem item;
+        while (record_buffer_.try_pop(item)) 
         {
-            std::lock_guard<std::mutex> lock(notification_mutex_);
-            notification_buffer_.push(message);
+            did_work = true;
+            EngineId eid = item.first;
+            const stream::L2Update& update = item.second;
+            if (eid >= engines_info_.size()) continue;
+            const std::string& ticker = engines_info_[eid].ticker_;
+            std::string path = (eid < record_path_override_.size() && !record_path_override_[eid].empty())
+                ? record_path_override_[eid] : ticker + ".csv";
+            auto& streams = record_streams_;
+            auto it = streams.find(eid);
+            if (it == streams.end()) 
+            {
+                auto ptr = std::make_unique<stream::L2Stream>(path, stream::StreamMode::Write);
+                it = streams.emplace(eid, std::move(ptr)).first;
+            }
+            if (it->second) it->second->write(update);
         }
-        // Wake the notification thread
-        notification_cv_.notify_one();
+
+        // Drain log buffer (cout)
+        std::string msg;
+        while (log_buffer_.try_pop(msg)) 
+        {
+            did_work = true;
+            std::cout << msg << std::endl;
+        }
+
+        if (!did_work) 
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
 }
 
+void backtest::runtime::EngineRuntime::notify(std::string&& message) noexcept
+{
+    if (!verbose_) return;
+    while (!log_buffer_.try_emplace(std::move(message)))
+    {
+        log_buffer_.try_flush();
+        std::this_thread::yield();
+    }
+}
 
+void backtest::runtime::EngineRuntime::record(EngineId engine_id, const stream::L2Update& update) noexcept
+{
+    while (!record_buffer_.try_emplace(engine_id, update))
+    {
+        record_buffer_.try_flush();
+        std::this_thread::yield();
+    }
+}
+
+void backtest::runtime::EngineRuntime::record_book_snapshot(EngineId engine_id) noexcept
+{
+    const engine::MarketSnapshot* snap = get_snapshot_fast(engine_id);
+    if (!snap) return;
+
+    const int64_t ts = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
+    stream::L2Update u;
+    u.timestamp = ts;
+    u.is_snapshot = true;
+
+    for (std::uint8_t i = 0; i < snap->bid_levels; ++i) {
+        u.price = math::ticks_to_dollars(snap->bid_prices[i]);
+        u.amount = math::internal_to_qty(snap->bid_depth[i]);
+        u.side = 'b';
+        record(engine_id, u);
+    }
+    for (std::uint8_t i = 0; i < snap->ask_levels; ++i) {
+        u.price = math::ticks_to_dollars(snap->ask_prices[i]);
+        u.amount = math::internal_to_qty(snap->ask_depth[i]);
+        u.side = 'a';
+        record(engine_id, u);
+    }
+}
+
+void backtest::runtime::EngineRuntime::set_record(std::string&& ticker, bool enable) noexcept
+{
+    auto it = ticker_to_engine_id_.find(ticker);
+    if (it == ticker_to_engine_id_.end()) return;
+    EngineId eid = it->second;
+    if (eid >= record_enabled_.size() || !record_enabled_[eid]) return;
+    record_enabled_[eid]->store(enable, std::memory_order_relaxed);
+}
+
+void backtest::runtime::EngineRuntime::set_record(std::string&& ticker, bool enable, std::string&& path_override) noexcept
+{
+    auto it = ticker_to_engine_id_.find(ticker);
+    if (it == ticker_to_engine_id_.end()) return;
+    EngineId eid = it->second;
+    if (eid >= record_enabled_.size() || !record_enabled_[eid]) return;
+    record_enabled_[eid]->store(enable, std::memory_order_relaxed);
+    if (eid < record_path_override_.size()) 
+    {
+        record_path_override_[eid] = enable ? std::forward<std::string>(path_override) : std::string();
+    }
+}
+
+bool backtest::runtime::EngineRuntime::get_record(const std::string& ticker) const noexcept
+{
+    auto it = ticker_to_engine_id_.find(ticker);
+    if (it == ticker_to_engine_id_.end()) return false;
+    EngineId eid = it->second;
+    if (eid >= record_enabled_.size() || !record_enabled_[eid]) return false;
+    return record_enabled_[eid]->load(std::memory_order_relaxed);
+}
 
 void backtest::runtime::EngineRuntime::update_snapshot_internal(EngineId engine_id) const noexcept
 {
@@ -2132,23 +2293,20 @@ void backtest::runtime::EngineRuntime::increment_order_counter(EngineId engine_i
     // Increment the per-engine counter (only the engine worker should call this)
     std::size_t count = ++info.orders_since_quantum_;
 
-    // If per-engine quantum reached, reset counter and publish snapshot for this engine
+    // If per-engine quantum reached, reset counter, publish snapshot, record book to L2 (if enabled), and run strategies for this engine only
     if (quantum != 0 && count >= quantum)
     {
         info.orders_since_quantum_ = 0;
         update_snapshot_internal(engine_id);
-    }
-
-    // Always increment the global quantum counter on every order. When the
-    // global counter reaches the configured quantum, notify all strategies
-    // once and reset the global counter. This decouples strategy execution
-    // frequency (global) from snapshot publication (per-engine).
-    const std::size_t prev = global_orders_since_quantum_.fetch_add(1, std::memory_order_relaxed);
-    if (prev + 1 >= quantum)
-    {
-        global_orders_since_quantum_.store(0, std::memory_order_relaxed);
-        for (auto& user : users_) {
-            user.on_book_update();
+        if (engine_id < record_enabled_.size() && record_enabled_[engine_id]->load(std::memory_order_relaxed))
+            record_book_snapshot(engine_id);
+        if (engine_id < users_per_engine_.size())
+        {
+            for (std::size_t idx : users_per_engine_[engine_id])
+            {
+                if (idx < users_.size())
+                    users_[idx].on_book_update();
+            }
         }
     }
 }

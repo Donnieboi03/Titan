@@ -65,6 +65,37 @@ After installing system libraries (step 3), run:
 pip install -r requirements.txt && pip install -e .
 ```
 
+## Docker
+
+You can install and run Titan inside a Docker container so you don’t need to install Highway, zlib, or a C++ toolchain on your host. The provided `Dockerfile` uses a Debian Bookworm base and installs `libhighway-dev`, `zlib1g-dev`, and `build-essential`, then runs `pip install .`.
+
+**Build the image** (from the repository root):
+
+```bash
+docker build -t titan .
+```
+
+**Verify the installation:**
+
+```bash
+docker run --rm titan python -c "import titan; print(titan.__version__)"
+```
+
+**Run Python interactively or execute a script:**
+
+```bash
+# Interactive Python shell
+docker run -it titan python
+
+# Shell inside the container (e.g. to run your own scripts)
+docker run -it titan bash
+
+# Run a script from your machine (mount current dir)
+docker run -v "$(pwd):/workspace" -w /workspace -it titan python your_script.py
+```
+
+**Requirements:** Docker (or a compatible engine). The image is based on `python:3.11-slim-bookworm`; `libhighway-dev` is available in Debian Bookworm, so no extra repositories are needed.
+
 ## Platform-specific notes
 
 ### macOS

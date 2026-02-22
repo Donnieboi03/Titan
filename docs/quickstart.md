@@ -127,8 +127,10 @@ def my_strategy(user):
 
 ### Step 2: Register the strategy
 
+Register the strategy for a ticker (e.g. "AAPL"). The strategy is bound to that ticker and runs every **quantum** (every N orders on that ticker), in sync with snapshot updates and L2 recording.
+
 ```python
-trader = runtime.register_strategy(my_strategy, starting_capital=50_000.0)
+trader = runtime.register_strategy("AAPL", my_strategy, starting_capital=50_000.0)
 print(f"User ID: {trader.get_user_id()}, Capital: ${trader.get_capital():.2f}")
 ```
 
@@ -187,6 +189,8 @@ parser.close()
 ```
 
 For full C++-driven simulation (parse and match inside the engine), use `runtime.simulate(filepath, ticker, target_orders)`. See `python/tests/test_binance_strategy_throughput.py`.
+
+**Per-ticker L2 recording:** Call `runtime.set_record(ticker, True)` (and optionally `set_record(ticker, True, "path/to/output.csv")` for a custom path) to enable **quantum-based** recording of the **order book snapshot** (top 20 levels per side) at the same cadence as strategy execution. Recording works during `simulate()` and with live orders; output goes to `{ticker}.csv` by default. Recording is lock-free.
 
 ## Common patterns
 

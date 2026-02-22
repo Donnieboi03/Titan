@@ -196,8 +196,11 @@ namespace engine
     using BidBook = Heap<Price, HeapType::MAX>;
     using AskBook = Heap<Price, HeapType::MIN>;
     
+    // Cache line size for alignment (optimize for your CPU: 128 for Apple M1/M2/M3, 64 for x86/AMD)
+    constexpr std::size_t CACHE_LINE = 128;
+
     // Top-K depth tracking (K = number of levels to track)
-    constexpr std::size_t DEPTH_K = 10;
+    constexpr std::size_t DEPTH_K = 20;
     using TopBidHeap = Heap<Price, HeapType::MAX>; // Top K bid prices
     using TopAskHeap = Heap<Price, HeapType::MIN>; // Top K ask prices
 
@@ -250,14 +253,14 @@ namespace engine
         Price best_bid;
         Price best_ask;
         Price market_price;      // Last trade execution price
-        Price bid_prices[10];
-        Price ask_prices[10];
+        Price bid_prices[DEPTH_K];
+        Price ask_prices[DEPTH_K];
         std::size_t placed_count;   // Total orders placed
         std::size_t cancelled_count; // Total orders cancelled
         std::size_t filled_count;    // Total orders filled
         std::size_t open_count;      // Current open orders
-        Quantity bid_depth[10];  // Top 10 bid levels
-        Quantity ask_depth[10];  // Top 10 ask levels
+        Quantity bid_depth[DEPTH_K];  // Top K bid levels
+        Quantity ask_depth[DEPTH_K];  // Top K ask levels
         std::uint8_t bid_levels;
         std::uint8_t ask_levels;
         bool auto_match;         // Current auto-match flag
@@ -268,7 +271,7 @@ namespace engine
               auto_match(false),
               placed_count(0), cancelled_count(0), filled_count(0), open_count(0)
         {
-            for (int i = 0; i < 10; ++i) 
+            for (std::size_t i = 0; i < DEPTH_K; ++i)
             {
                 bid_depth[i] = 0;
                 ask_depth[i] = 0;
