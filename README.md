@@ -1,4 +1,4 @@
-# ⚡ Titan: Multi-Agent Market Microstructure Backtesting Engine
+# ⚡ Titan: Multi-Agent Market Microstructure Backtesting Library
 
 Titan is a high‑performance backtesting engine for **algorithmic trading strategies** built on a modern C++20 core with a **Python-first** interface.  
 It is designed for realistic **Level‑2 / Level‑3 (order‑by‑order)** market simulations, multi‑agent experiments, and research‑grade performance studies.
