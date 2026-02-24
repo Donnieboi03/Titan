@@ -62,9 +62,10 @@ template <typename T>
 DoubleBuffer<T>::DoubleBuffer(std::size_t capacity) noexcept
 : capacity_(capacity)
 {
-    buffer_a_.reserve(capacity); 
-    buffer_b_.reserve(capacity);
-    
+    // resize so operator[] is valid for [0, capacity); reserve() alone leaves size()==0 and [0] is OOB
+    buffer_a_.resize(capacity);
+    buffer_b_.resize(capacity);
+
     producer_.write_buffer.store(&buffer_a_, std::memory_order_relaxed);
     consumer_.read_buffer.store(&buffer_b_, std::memory_order_relaxed);
 }

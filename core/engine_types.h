@@ -10,6 +10,9 @@
 
 namespace engine
 {
+    // Cache line size for alignment (avoid false sharing). Typical: 64 (x86) or 128 (Apple Silicon).
+    constexpr std::size_t CACHE_LINE = 128;
+
     // High-precision timestamp (nanoseconds)
     using Timestamp = std::uint64_t;
     inline Timestamp now_ns() noexcept {
@@ -196,11 +199,8 @@ namespace engine
     using BidBook = Heap<Price, HeapType::MAX>;
     using AskBook = Heap<Price, HeapType::MIN>;
     
-    // Cache line size for alignment (optimize for your CPU: 128 for Apple M1/M2/M3, 64 for x86/AMD)
-    constexpr std::size_t CACHE_LINE = 128;
-
     // Top-K depth tracking (K = number of levels to track)
-    constexpr std::size_t DEPTH_K = 20;
+    constexpr std::size_t DEPTH_K = 15;
     using TopBidHeap = Heap<Price, HeapType::MAX>; // Top K bid prices
     using TopAskHeap = Heap<Price, HeapType::MIN>; // Top K ask prices
 
@@ -271,7 +271,7 @@ namespace engine
               auto_match(false),
               placed_count(0), cancelled_count(0), filled_count(0), open_count(0)
         {
-            for (std::size_t i = 0; i < DEPTH_K; ++i)
+            for (int i = 0; i < DEPTH_K; ++i) 
             {
                 bid_depth[i] = 0;
                 ask_depth[i] = 0;

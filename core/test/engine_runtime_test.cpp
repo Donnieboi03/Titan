@@ -1,6 +1,7 @@
 #include "../engine_runtime.cpp"
 #include "../order_engine.cpp"
 #include "../market_data_stream.cpp"
+#include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <unistd.h>
@@ -85,10 +86,20 @@ void test_market_data_reads() {
     bool success = runtime.register_stock("TSLA", 200.00, 100.0);
     assert(success);
     
-    // Test market data reads
-    auto market_price = runtime.get_market_price("TSLA");
-    auto best_bid = runtime.get_best_bid("TSLA");
-    auto best_ask = runtime.get_best_ask("TSLA");
+    // Test market data reads (request → process → get for fresh snapshot)
+    runtime.request_snapshot("TSLA");
+    runtime.process_pending_orders();
+    const auto* snap_tsla = runtime.get_snapshot("TSLA");
+    double market_price = -1.0, best_bid = -1.0, best_ask = -1.0;
+    if (snap_tsla) {
+        if (snap_tsla->best_bid != static_cast<engine::Price>(-1)) best_bid = backtest::math::ticks_to_dollars(snap_tsla->best_bid);
+        if (snap_tsla->best_ask != static_cast<engine::Price>(-1)) best_ask = backtest::math::ticks_to_dollars(snap_tsla->best_ask);
+        if (snap_tsla->best_bid != static_cast<engine::Price>(-1) && snap_tsla->best_ask != static_cast<engine::Price>(-1))
+            market_price = (backtest::math::ticks_to_dollars(snap_tsla->best_bid) + backtest::math::ticks_to_dollars(snap_tsla->best_ask)) / 2.0;
+        else if (snap_tsla->best_ask != static_cast<engine::Price>(-1)) market_price = backtest::math::ticks_to_dollars(snap_tsla->best_ask);
+        else if (snap_tsla->best_bid != static_cast<engine::Price>(-1)) market_price = backtest::math::ticks_to_dollars(snap_tsla->best_bid);
+        else if (snap_tsla->market_price != static_cast<engine::Price>(-1)) market_price = backtest::math::ticks_to_dollars(snap_tsla->market_price);
+    }
     
     assert(best_ask != 0);
     assert(best_ask == 200.00);
@@ -99,7 +110,13 @@ void test_market_data_reads() {
     std::cout << "✓ No bids available as expected" << std::endl;
     
     // Test market depth
-    auto depth = runtime.get_market_depth("TSLA", engine::OrderSide::ASK);
+    std::vector<std::pair<double, double>> depth;
+    if (snap_tsla) {
+        std::size_t n = std::min(static_cast<std::size_t>(snap_tsla->ask_levels), static_cast<std::size_t>(10));
+        depth.reserve(n);
+        for (std::size_t i = 0; i < n; ++i)
+            depth.emplace_back(backtest::math::ticks_to_dollars(snap_tsla->ask_prices[i]), backtest::math::internal_to_qty(snap_tsla->ask_depth[i]));
+    }
     assert(depth.size() >= 1);
     std::cout << "✓ Market depth: " << depth.size() << " levels" << std::endl;
 }
@@ -118,33 +135,38 @@ void test_limit_orders() {
     runtime.submit_limit_order("NVDA", engine::OrderSide::BID, 795.00, 1.0);
     runtime.submit_limit_order("NVDA", engine::OrderSide::BID, 790.00, 2.0);
     runtime.submit_limit_order("NVDA", engine::OrderSide::BID, 785.00, 1.5);
+    runtime.request_snapshot("NVDA");
     runtime.process_pending_orders();
     
     // Verify all 3 buy orders were placed using engine counts (4 total = 1 IPO + 3 bids)
-    std::size_t placed_after_bids = runtime.get_placed_count("NVDA");
+    const auto* snap_nvda = runtime.get_snapshot("NVDA");
+    std::size_t placed_after_bids = snap_nvda ? snap_nvda->placed_count : 0;
     if (placed_after_bids == 4) {
         std::cout << "✓ All 3 bid orders successfully placed (plus IPO)" << std::endl;
     }
     
     // Check best bid
-    auto best_bid = runtime.get_best_bid("NVDA");
+    const auto* snap_bid = runtime.get_snapshot("NVDA");
+    double best_bid = snap_bid && snap_bid->best_bid != static_cast<engine::Price>(-1) ? backtest::math::ticks_to_dollars(snap_bid->best_bid) : -1.0;
     assert(best_bid != 0);
     assert(std::abs(best_bid - 795.00) < 0.01);
     std::cout << "✓ Best bid: $" << std::fixed << std::setprecision(2) << best_bid << std::endl;
     
     // Submit sell order above market (no fill) - price it high enough to avoid matching
     runtime.submit_limit_order("NVDA", engine::OrderSide::ASK, 850.00, 0.5);
+    runtime.request_snapshot("NVDA");
     runtime.process_pending_orders();
     
     // Verify all 5 orders are now placed (1 IPO + 3 bids + 1 ask) using engine counts
-    std::size_t final_placed = runtime.get_placed_count("NVDA");
-    std::size_t final_open = runtime.get_open_count("NVDA");
+    snap_nvda = runtime.get_snapshot("NVDA");
+    std::size_t final_placed = snap_nvda ? snap_nvda->placed_count : 0;
+    std::size_t final_open = snap_nvda ? snap_nvda->open_count : 0;
     
     if (final_placed == 5 && final_open == 5) {
         std::cout << "✓ All orders successfully placed" << std::endl;
     }
     
-    auto best_ask = runtime.get_best_ask("NVDA");
+    double best_ask = snap_nvda && snap_nvda->best_ask != static_cast<engine::Price>(-1) ? backtest::math::ticks_to_dollars(snap_nvda->best_ask) : -1.0;
     assert(best_ask != 0);
     assert(std::abs(best_ask - 800.00) < 0.01); // Should still be IPO price
     std::cout << "✓ Best ask: $" << std::fixed << std::setprecision(2) << best_ask << std::endl;
@@ -163,22 +185,33 @@ void test_market_orders() {
     // Place some limit orders to create a book
     runtime.submit_limit_order("MSFT", engine::OrderSide::BID, 299.00, 2.0);
     runtime.submit_limit_order("MSFT", engine::OrderSide::BID, 298.00, 3.0);
+    runtime.request_snapshot("MSFT");
     runtime.process_pending_orders();
     
     // Verify limit orders were placed using engine counts (3 total = 1 IPO + 2 limit)
-    std::size_t limit_placed = runtime.get_placed_count("MSFT");
+    const auto* snap_msft = runtime.get_snapshot("MSFT");
+    std::size_t limit_placed = snap_msft ? snap_msft->placed_count : 0;
     if (limit_placed == 3) {
         std::cout << "✓ Both limit orders successfully placed plus IPO" << std::endl;
     }
     
     // Submit market buy order (should match against the ask at $300)
     runtime.submit_market_order("MSFT", engine::OrderSide::BID, 1.0);
+    runtime.request_snapshot("MSFT");
     runtime.process_pending_orders();
     
     std::cout << "✓ Market order processed" << std::endl;
     
     // Check if market price updated (should be around $300)
-    auto market_price = runtime.get_market_price("MSFT");
+    const auto* snap_msft2 = runtime.get_snapshot("MSFT");
+    double market_price = -1.0;
+    if (snap_msft2) {
+        if (snap_msft2->best_bid != static_cast<engine::Price>(-1) && snap_msft2->best_ask != static_cast<engine::Price>(-1))
+            market_price = (backtest::math::ticks_to_dollars(snap_msft2->best_bid) + backtest::math::ticks_to_dollars(snap_msft2->best_ask)) / 2.0;
+        else if (snap_msft2->best_ask != static_cast<engine::Price>(-1)) market_price = backtest::math::ticks_to_dollars(snap_msft2->best_ask);
+        else if (snap_msft2->best_bid != static_cast<engine::Price>(-1)) market_price = backtest::math::ticks_to_dollars(snap_msft2->best_bid);
+        else if (snap_msft2->market_price != static_cast<engine::Price>(-1)) market_price = backtest::math::ticks_to_dollars(snap_msft2->market_price);
+    }
     if (market_price != 0) {
         std::cout << "✓ Market order executed at: $" << std::fixed << std::setprecision(2) << market_price << std::endl;
     }
@@ -199,7 +232,7 @@ void test_order_cancellation() {
     runtime.process_pending_orders();
     
     // Get positions to find the order ID
-    auto positions = runtime.user_get_positions(0, "AMZN");
+    auto positions = runtime.get_positions(0, "AMZN");
     
     if (!positions.empty()) {
         // Try to cancel the first order (or second if IPO is first)
@@ -226,7 +259,7 @@ void test_order_editing() {
     runtime.process_pending_orders();
     
     // Get order ID (expecting IPO order for user 0 plus our order)
-    auto positions = runtime.user_get_positions(0, "GOOGL");
+    auto positions = runtime.get_positions(0, "GOOGL");
     if (positions.size() == 2) {
         // IPO order is at position 0, user order at position 1
         std::cout << "✓ User has 2 positions as expected (1 IPO + 1 user order)" << std::endl;
@@ -236,8 +269,11 @@ void test_order_editing() {
         std::cout << "INFO: User has " << positions.size() << " positions" << std::endl;
     }
     
+    runtime.request_snapshot("GOOGL");
+    runtime.process_pending_orders();
     // Verify initial placement with engine counts (2 total = 1 IPO + 1 user)
-    std::size_t placed_before = runtime.get_placed_count("GOOGL");
+    const auto* snap_googl = runtime.get_snapshot("GOOGL");
+    std::size_t placed_before = snap_googl ? snap_googl->placed_count : 0;
     if (placed_before == 2) {
         std::cout << "✓ Initial order successfully placed plus IPO" << std::endl;
     }
@@ -249,18 +285,21 @@ void test_order_editing() {
         
         // Edit the order (new price and quantity)
         runtime.submit_edit_order("GOOGL", order_to_edit, 2790.00, 1.5);
+        runtime.request_snapshot("GOOGL");
         runtime.process_pending_orders();
         std::cout << "✓ Order edit submitted" << std::endl;
         
         // Verify order still exists
-        std::size_t open_after = runtime.get_open_count("GOOGL");
+        std::size_t open_after = 0;
+        if (const auto* s = runtime.get_snapshot("GOOGL")) open_after = s->open_count;
         
         if (open_after >= 1) {
             std::cout << "✓ Order successfully edited" << std::endl;
         }
         
         // Verify the best bid changed
-        auto best_bid = runtime.get_best_bid("GOOGL");
+        const auto* snap_googl2 = runtime.get_snapshot("GOOGL");
+        double best_bid = snap_googl2 && snap_googl2->best_bid != static_cast<engine::Price>(-1) ? backtest::math::ticks_to_dollars(snap_googl2->best_bid) : -1.0;
         if (best_bid != 0) {
             std::cout << "✓ Best bid after edit: $" << std::fixed << std::setprecision(2) << best_bid << std::endl;
         }
@@ -286,11 +325,13 @@ void test_multi_user_trading() {
     runtime.submit_limit_order("META", engine::OrderSide::BID, 246.00, 2.0);
     
     // Check positions after 4 limit orders
+    runtime.request_snapshot("META");
     runtime.process_pending_orders();
     
     // Verify using engine counts (5 total = 1 IPO + 4 user orders)
-    std::size_t placed_before_market = runtime.get_placed_count("META");
-    std::size_t open_before_market = runtime.get_open_count("META");
+    const auto* snap_meta = runtime.get_snapshot("META");
+    std::size_t placed_before_market = snap_meta ? snap_meta->placed_count : 0;
+    std::size_t open_before_market = snap_meta ? snap_meta->open_count : 0;
     if (placed_before_market == 5 && open_before_market == 5) {
         std::cout << "✓ All 4 user limit orders successfully placed" << std::endl;
     }
@@ -331,6 +372,7 @@ void test_async_processing() {
     
     // Process all pending orders
     auto start = std::chrono::high_resolution_clock::now();
+    runtime.request_snapshot("AAPL");
     runtime.process_pending_orders();
     auto end = std::chrono::high_resolution_clock::now();
     
@@ -338,7 +380,8 @@ void test_async_processing() {
     std::cout << "✓ Processed " << BASIC_TEST_ORDERS << " orders in " << duration.count() << " microseconds" << std::endl;
     
     // Verify all orders were actually placed using engine counts
-    std::size_t placed_count = runtime.get_placed_count("AAPL");
+    const auto* snap_aapl = runtime.get_snapshot("AAPL");
+    std::size_t placed_count = snap_aapl ? snap_aapl->placed_count : 0;
     std::cout << "Placed count: " << placed_count << ", expected: " << BASIC_TEST_ORDERS + 1 << std::endl;
     
     if (placed_count == BASIC_TEST_ORDERS + 1) {
@@ -386,6 +429,7 @@ void test_stress_performance() {
     
     // Process all orders (wait for workers to complete)
     auto process_start = std::chrono::high_resolution_clock::now();
+    runtime.request_snapshot("STRESS");
     runtime.process_pending_orders();
     auto process_end = std::chrono::high_resolution_clock::now();
     
@@ -399,9 +443,10 @@ void test_stress_performance() {
     std::cout << "✓ End-to-end throughput: " << std::fixed << std::setprecision(0) << orders_per_second << " orders/second" << std::endl;
     
     // Verify results with matching
-    std::size_t placed_count = runtime.get_placed_count("STRESS");
-    std::size_t open_count = runtime.get_open_count("STRESS");
-    std::size_t filled_count = runtime.get_filled_count("STRESS");
+    const auto* snap_stress = runtime.get_snapshot("STRESS");
+    std::size_t placed_count = snap_stress ? snap_stress->placed_count : 0;
+    std::size_t open_count = snap_stress ? snap_stress->open_count : 0;
+    std::size_t filled_count = snap_stress ? snap_stress->filled_count : 0;
     
     std::cout << "✓ Placement results - Placed: " << placed_count 
               << ", Open: " << open_count 
@@ -414,21 +459,23 @@ void test_stress_performance() {
     std::cout << "Phase 2: Testing order cancellation..." << std::endl;
     
     // Get half the orders to cancel
-    auto positions = runtime.user_get_positions(0, "STRESS");
+    auto positions = runtime.get_positions(0, "STRESS");
     std::size_t cancel_count = std::min(static_cast<std::size_t>(positions.size() / 2), static_cast<std::size_t>(500000));  // Cancel up to 500k
     
     auto cancel_start = std::chrono::high_resolution_clock::now();
     for (std::size_t i = 0; i < cancel_count; ++i) {
         runtime.submit_cancel_order("STRESS", positions[i]);
     }
+    runtime.request_snapshot("STRESS");
     runtime.process_pending_orders();
     auto cancel_end = std::chrono::high_resolution_clock::now();
     
     auto cancel_duration = std::chrono::duration_cast<std::chrono::microseconds>(cancel_end - cancel_start);
     double cancel_ops_per_sec = cancel_count / (cancel_duration.count() / 1000000.0);
     
-    std::size_t cancelled_count = runtime.get_cancelled_count("STRESS");
-    std::size_t open_after_cancel = runtime.get_open_count("STRESS");
+    snap_stress = runtime.get_snapshot("STRESS");
+    std::size_t cancelled_count = snap_stress ? snap_stress->cancelled_count : 0;
+    std::size_t open_after_cancel = snap_stress ? snap_stress->open_count : 0;
     
     std::cout << "✓ Cancelled " << cancelled_count << " orders in " << cancel_duration.count() 
               << " microseconds (" << std::fixed << std::setprecision(0) << cancel_ops_per_sec << " ops/sec)" << std::endl;
@@ -438,7 +485,7 @@ void test_stress_performance() {
     std::cout << "Phase 3: Testing order editing..." << std::endl;
     
     // Get remaining orders to edit
-    auto remaining_positions = runtime.user_get_positions(0, "STRESS");
+    auto remaining_positions = runtime.get_positions(0, "STRESS");
     std::size_t edit_count = std::min(static_cast<std::size_t>(remaining_positions.size() / 2), static_cast<std::size_t>(250000));  // Edit up to 250k
     
     auto edit_start = std::chrono::high_resolution_clock::now();
@@ -447,6 +494,7 @@ void test_stress_performance() {
         double new_price = 60.00 + (i % 100) * 0.01;
         runtime.submit_edit_order("STRESS", remaining_positions[i], new_price, 0.2);
     }
+    runtime.request_snapshot("STRESS");
     runtime.process_pending_orders();
     auto edit_end = std::chrono::high_resolution_clock::now();
     
@@ -457,10 +505,11 @@ void test_stress_performance() {
               << " microseconds (" << std::fixed << std::setprecision(0) << edit_ops_per_sec << " ops/sec)" << std::endl;
     
     // ========== FINAL VERIFICATION ==========
-    std::size_t final_placed = runtime.get_placed_count("STRESS");
-    std::size_t final_open = runtime.get_open_count("STRESS");
-    std::size_t final_filled = runtime.get_filled_count("STRESS");
-    std::size_t final_cancelled = runtime.get_cancelled_count("STRESS");
+    snap_stress = runtime.get_snapshot("STRESS");
+    std::size_t final_placed = snap_stress ? snap_stress->placed_count : 0;
+    std::size_t final_open = snap_stress ? snap_stress->open_count : 0;
+    std::size_t final_filled = snap_stress ? snap_stress->filled_count : 0;
+    std::size_t final_cancelled = snap_stress ? snap_stress->cancelled_count : 0;
     
     std::cout << "✓ Final counts - Placed: " << final_placed 
               << ", Open: " << final_open 
@@ -468,7 +517,13 @@ void test_stress_performance() {
               << ", Cancelled: " << final_cancelled << std::endl;
     
     // Verify market depth
-    auto depth = runtime.get_market_depth("STRESS", engine::OrderSide::BID, 10);
+    std::vector<std::pair<double, double>> depth;
+    if (snap_stress) {
+        std::size_t n = std::min(static_cast<std::size_t>(snap_stress->bid_levels), static_cast<std::size_t>(10));
+        depth.reserve(n);
+        for (std::size_t i = 0; i < n; ++i)
+            depth.emplace_back(backtest::math::ticks_to_dollars(snap_stress->bid_prices[i]), backtest::math::internal_to_qty(snap_stress->bid_depth[i]));
+    }
     std::cout << "✓ Market depth has " << depth.size() << " bid levels" << std::endl;
     
     std::cout << "✓ Memory footprint: ~" << (1500000 * sizeof(void*) / (1024 * 1024)) << " MB" << std::endl;
@@ -538,16 +593,20 @@ void test_multi_stock_stress() {
     std::cout << "✓ End-to-end throughput: " << std::fixed << std::setprecision(0) 
               << orders_per_second << " orders/second" << std::endl;
     
+    // Request fresh snapshots for all tickers, then process, then get
+    for (const auto& t : tickers) runtime.request_snapshot(t);
+    runtime.process_pending_orders();
+    
     // Verify results for each stock
     std::size_t total_placed = 0;
     std::size_t total_filled = 0;
     std::size_t total_open = 0;
     
     for (const auto& ticker : tickers) {
-        std::size_t placed = runtime.get_placed_count(ticker);
-        std::size_t filled = runtime.get_filled_count(ticker);
-        std::size_t open = runtime.get_open_count(ticker);
-        
+        const auto* s = runtime.get_snapshot(ticker);
+        std::size_t placed = s ? s->placed_count : 0;
+        std::size_t filled = s ? s->filled_count : 0;
+        std::size_t open = s ? s->open_count : 0;
         total_placed += placed;
         total_filled += filled;
         total_open += open;
@@ -565,10 +624,10 @@ void test_multi_stock_stress() {
     // Phase 2: Per-stock statistics
     std::cout << "\nPer-Stock Statistics:" << std::endl;
     for (const auto& ticker : tickers) {
-        std::size_t placed = runtime.get_placed_count(ticker);
-        std::size_t filled = runtime.get_filled_count(ticker);
-        std::size_t open = runtime.get_open_count(ticker);
-        
+        const auto* s = runtime.get_snapshot(ticker);
+        std::size_t placed = s ? s->placed_count : 0;
+        std::size_t filled = s ? s->filled_count : 0;
+        std::size_t open = s ? s->open_count : 0;
         std::cout << "  " << ticker << ": Placed=" << placed 
                   << ", Filled=" << filled 
                   << ", Open=" << open << std::endl;
@@ -614,14 +673,16 @@ void test_accumulate_drain_runtime()
     auto drain_start = std::chrono::high_resolution_clock::now();
     runtime.set_auto_match(ticker, true);
     // Wait for worker to process toggle and drain queued orders
+    runtime.request_snapshot(ticker);
     runtime.process_pending_orders();
     auto drain_end = std::chrono::high_resolution_clock::now();
     auto drain_ms = std::chrono::duration_cast<std::chrono::milliseconds>(drain_end - drain_start).count();
 
     // Refresh snapshot and report
-    std::size_t placed = runtime.get_placed_count(ticker);
-    std::size_t filled = runtime.get_filled_count(ticker);
-    std::size_t open = runtime.get_open_count(ticker);
+    const auto* snap_acc = runtime.get_snapshot(ticker);
+    std::size_t placed = snap_acc ? snap_acc->placed_count : 0;
+    std::size_t filled = snap_acc ? snap_acc->filled_count : 0;
+    std::size_t open = snap_acc ? snap_acc->open_count : 0;
 
     double drain_rate = drain_ms > 0 ? (placed / (drain_ms / 1000.0)) : 0.0;
     std::cout << " Drain: processed " << placed << " queued orders in " << drain_ms << " ms (" << drain_rate << " ops/sec)\n";
@@ -788,10 +849,20 @@ void test_simulate_throughput() {
         
         // Wait for simulation to complete - keep processing jobs while running
         std::cout << "Waiting for simulation to complete..." << std::endl;
-        
-        // Give a moment for final metrics to publish
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        
+        const int wait_timeout_sec = 60;
+        int waited = 0;
+        while (runtime.is_simulation_running(TICKER) && waited < wait_timeout_sec) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            runtime.process_pending_orders();
+            waited++;
+        }
+        if (waited >= wait_timeout_sec) {
+            std::cout << "⚠️  Simulation did not finish within " << wait_timeout_sec << "s - metrics may be partial" << std::endl;
+        } else {
+            std::cout << "✓ Simulation completed after ~" << (waited * 100) << " ms" << std::endl;
+        }
+        runtime.process_pending_orders();  // One more drain for final metrics
+    
         auto end = std::chrono::high_resolution_clock::now();
         double total_sec = std::chrono::duration<double>(end - start).count();
         
@@ -866,22 +937,24 @@ int main() {
     
     try {
         
-        test_singleton_pattern();
-        test_stock_registration();
-        test_market_data_reads();
-        test_limit_orders();
-        test_market_orders();
-        test_order_cancellation();
-        test_order_editing();
-        test_multi_user_trading();
-        test_async_processing();
-        test_stress_performance();
-        test_multi_stock_stress();
-        test_accumulate_drain_runtime();
-        test_edge_cases();
-        test_notifications();
-        test_order_fill_notification_flag();
-        test_simulate_throughput();  // Re-enabled with improved parser state cleanup
+        for (int i = 0; i < 10; i++) {
+            test_singleton_pattern();
+            test_stock_registration();
+            test_market_data_reads();
+            test_limit_orders();
+            test_market_orders();
+            test_order_editing();
+            test_order_cancellation();
+            test_multi_user_trading();
+            test_async_processing();
+            test_stress_performance();
+            test_multi_stock_stress();
+            test_accumulate_drain_runtime();
+            test_edge_cases();
+            test_notifications();
+            test_order_fill_notification_flag();
+            test_simulate_throughput();
+        }  
         
         std::cout << "\n" << std::string(60, '=') << std::endl;
         std::cout << "🎉 ALL TESTS PASSED! 🎉" << std::endl;

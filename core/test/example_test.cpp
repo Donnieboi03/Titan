@@ -109,6 +109,8 @@ int main(int argc, char** argv)
     runtime.submit_limit_order("ACME", engine::OrderSide::BID, 25.40, 10.0);
 
     // Process jobs so that seeded orders are handled and strategies will be invoked by quantum
+    runtime.request_snapshot("EXM");
+    runtime.request_snapshot("ACME");
     runtime.process_pending_orders();
 
     // Now inspect results: positions, best bid/ask and PnL
@@ -125,10 +127,11 @@ int main(int argc, char** argv)
 
     // Print aggregate stats for both tickers
     for (const auto& t : {std::string("EXM"), std::string("ACME")}) {
-        std::cout << "Ticker " << t << ": Placed=" << runtime.get_placed_count(t)
-                  << " Open=" << runtime.get_open_count(t)
-                  << " Filled=" << runtime.get_filled_count(t)
-                  << " Cancelled=" << runtime.get_cancelled_count(t) << "\n";
+        const auto* s = runtime.get_snapshot(t);
+        std::cout << "Ticker " << t << ": Placed=" << (s ? s->placed_count : 0)
+                  << " Open=" << (s ? s->open_count : 0)
+                  << " Filled=" << (s ? s->filled_count : 0)
+                  << " Cancelled=" << (s ? s->cancelled_count : 0) << "\n";
     }
 
     // Demonstrate how a client would cancel or edit orders via User wrapper

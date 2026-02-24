@@ -84,7 +84,7 @@ void test_ipo_holder_positions() {
     runtime.process_pending_orders();
     
     // Check IPO holder positions
-    auto ipo_positions = runtime.user_get_positions(user::IPO_HOLDER, "ETH");
+    auto ipo_positions = runtime.get_positions(user::IPO_HOLDER, "ETH");
     assert(!ipo_positions.empty() && "IPO_HOLDER should have positions");
     std::cout << "✓ IPO_HOLDER has " << ipo_positions.size() << " order(s)" << std::endl;
     
@@ -381,12 +381,15 @@ void test_simulate_with_example_file() {
     std::cout << "    Fill rate:                " << std::fixed << std::setprecision(2) << fill_rate << "%" << std::endl;
 
     std::cout << "\n  Engine stats (runtime API):" << std::endl;
-    std::cout << "    Placed:                   " << runtime.get_placed_count(ticker) << std::endl;
-    std::cout << "    Filled:                   " << runtime.get_filled_count(ticker) << std::endl;
-    std::cout << "    Cancelled:                " << runtime.get_cancelled_count(ticker) << std::endl;
-    std::cout << "    Open:                     " << runtime.get_open_count(ticker) << std::endl;
+    runtime.request_snapshot(ticker);
+    runtime.process_pending_orders();
+    const auto* snap = runtime.get_snapshot(ticker);
+    std::cout << "    Placed:                   " << (snap ? snap->placed_count : 0) << std::endl;
+    std::cout << "    Filled:                   " << (snap ? snap->filled_count : 0) << std::endl;
+    std::cout << "    Cancelled:                " << (snap ? snap->cancelled_count : 0) << std::endl;
+    std::cout << "    Open:                     " << (snap ? snap->open_count : 0) << std::endl;
     std::cout << "    Capacity:                 " << runtime.get_capacity(ticker) << std::endl;
-    std::cout << "    Open (utilization):       " << runtime.get_utilization(ticker) << std::endl;
+    std::cout << "    Open (utilization):       " << (snap ? snap->open_count : 0) << std::endl;
     std::cout << "    Pending:                  " << runtime.get_pending_count(ticker) << std::endl;
 
     // Per-user stats (running strategies)

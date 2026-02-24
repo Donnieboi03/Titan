@@ -67,7 +67,7 @@ except FileNotFoundError:
 
 setup(
     name="titan-backtesting",
-    version="1.0.0",
+    version="1.1.0",
     author="https://github.com/Donnieboi03",
     description="Multi-agent market microstructure backtesting library",
     long_description=long_description,
@@ -75,6 +75,7 @@ setup(
     url="https://github.com/Donnieboi03/Titan",
     packages=find_packages(where="python"),
     package_dir={"": "python"},
+    package_data={"titan": ["*.pyi"]},
     ext_modules=ext_modules,
     setup_requires=[
         "pybind11>=2.10.0",

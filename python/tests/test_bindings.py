@@ -65,7 +65,8 @@ def test_basic_functionality():
     runtime.submit_limit_order("AAPL", "ASK", 151.0, 100.0)
     print("✓ Submitted orders")
 
-    # Process
+    # Process (request → process → get for fresh snapshot data)
+    runtime.request_snapshot("AAPL")
     runtime.process_pending_orders()
     print("✓ Processed orders")
 
@@ -116,6 +117,7 @@ def test_strategy_registration():
         runtime.submit_limit_order("TSLA", "BID", 695.0 + i, 50.0)
         runtime.submit_limit_order("TSLA", "ASK", 705.0 + i, 50.0)
 
+    runtime.request_snapshot("TSLA")
     runtime.process_pending_orders()
 
     # Check trader's positions
@@ -211,6 +213,7 @@ def test_order_management():
         runtime.submit_limit_order("SPY", "BID", 448.0 + i * 0.5, 100.0)
         runtime.submit_limit_order("SPY", "ASK", 452.0 + i * 0.5, 100.0)
 
+    runtime.request_snapshot("SPY")
     runtime.process_pending_orders()
 
     # Check orders
@@ -245,6 +248,7 @@ def test_diagnostics():
         runtime.submit_limit_order("GOOGL", "BID", 2790.0 + i * 0.5, 10.0)
         runtime.submit_limit_order("GOOGL", "ASK", 2810.0 + i * 0.5, 10.0)
 
+    runtime.request_snapshot("GOOGL")
     runtime.process_pending_orders()
 
     # Get diagnostics

@@ -239,6 +239,7 @@ namespace engine
             if (!recent) break;
             if (recent->qty_ == 0) break;
 
+            if (ask_book_.empty() || bid_book_.empty()) break;
             const Price best_ask_price = ask_book_.peek();
             const Price best_bid_price = bid_book_.peek();
 

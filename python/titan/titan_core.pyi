@@ -353,7 +353,24 @@ class EngineRuntime:
         """
         ...
 
+    def get_positions(self, user_id: int, ticker: str) -> List[int]:
+        """Return order IDs for the given user on the given ticker."""
+        ...
+
+    def get_active_orders(self, user_id: int, ticker: str) -> List[int]:
+        """Return active (open) order IDs for the given user on the given ticker."""
+        ...
+
     # --- Batch processing ---
+    def request_snapshot(self, ticker: str) -> bool:
+        """
+        Request a snapshot refresh for the given ticker. The update is applied
+        on the next process_pending_orders(). For up-to-date market/stats,
+        use: request_snapshot(ticker) → process_pending_orders() → get_best_bid / get_placed_count / etc.
+        Returns True if the ticker exists and the job was queued.
+        """
+        ...
+
     @overload
     def process_pending_orders(self) -> None:
         """Flush all pending orders across all engines (synchronous)."""

@@ -47,7 +47,8 @@ This creates an order book for AAPL and an IPO holder with 1M shares at $150.
 # Submit a limit order: BUY 100 shares @ $149.50
 runtime.submit_limit_order("AAPL", "BID", 149.50, 100.0)
 
-# Process pending orders (matching)
+# For up-to-date snapshot data after processing, request snapshot then process
+runtime.request_snapshot("AAPL")
 runtime.process_pending_orders()
 ```
 
@@ -61,6 +62,8 @@ Order APIs:
 Use `"BID"` or `"ASK"` for `side`.
 
 ### Step 5: Query market state
+
+After `request_snapshot(ticker)` and `process_pending_orders()`, market and stats reflect the just-processed orders (see [API — request_snapshot](api.md#request_snapshot)).
 
 ```python
 price = runtime.get_market_price("AAPL")
@@ -96,6 +99,7 @@ def main():
 
     runtime.submit_limit_order("AAPL", "BID", 149.50, 100.0)
     runtime.submit_limit_order("AAPL", "ASK", 150.50, 100.0)
+    runtime.request_snapshot("AAPL")
     runtime.process_pending_orders()
 
     print(f"Market price: ${runtime.get_market_price('AAPL'):.2f}")
@@ -109,13 +113,13 @@ if __name__ == "__main__":
 
 ## Using a Python strategy (callback)
 
-You register a **callable** that receives a `User` handle and submits orders on behalf of that user.
+You can register a **callable** that receives a `User` handle; the engine invokes it every quantum. Strategy logic is up to you; the following is a minimal example to show the mechanism.
 
-### Step 1: Define a strategy function
+### Step 1: Define a callable
 
 ```python
 def my_strategy(user):
-    """Called by the engine; user is a titan.User handle."""
+    """Called by the engine every quantum; user is a titan.User handle."""
     for ticker in user.list_tickers():
         bid = user.get_best_bid(ticker)
         ask = user.get_best_ask(ticker)

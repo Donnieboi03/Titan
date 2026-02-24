@@ -2,13 +2,20 @@
 
 **Start here:** [Installation](installation.md) → [Quick Start](quickstart.md) → [API Reference](api.md).
 
-## Docs
+## Getting started
 
-- [Installation](installation.md) – How to install the Titan Python library (from source or [Docker](installation.md#docker))
+- [Installation](installation.md) – Install the Titan Python library (from source or [Docker](installation.md#docker))
 - [Quick Start](quickstart.md) – Your first backtest in a few minutes
-- [API Reference](api.md) – Python API documentation
 
-## Examples & scripts
+## Guides
+
+- [L2 Data and Recording](l2_data_and_recording.md) – Incremental stream vs TopK snapshots, when to use each, replay vs analysis, rationale for each
+
+## API
+
+- [API Reference](api.md) – Python API (EngineRuntime, User, L2Stream, etc.)
+
+## Examples and scripts
 
 - [test_bindings.py](../python/tests/test_bindings.py) – Runtime and strategy registration
 - [test_binance_strategy_throughput.py](../python/tests/test_binance_strategy_throughput.py) – L2 data replay

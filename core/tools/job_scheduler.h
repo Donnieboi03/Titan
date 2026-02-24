@@ -46,7 +46,7 @@ namespace scheduler
     class JobScheduler
     {
     public:
-        JobScheduler(std::size_t num_workers = 1, std::size_t batch_capacity = 1048576);
+        JobScheduler(std::size_t num_workers = 1, std::size_t batch_capacity = 131072);  // 2^17
 
         JobScheduler(const JobScheduler&) = delete;
         JobScheduler& operator=(const JobScheduler&) = delete;

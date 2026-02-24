@@ -195,6 +195,31 @@ runtime.submit_edit_order("AAPL", order_id=12345, new_price=149.75, user_id=100)
 
 ---
 
+#### request_snapshot()
+
+Request a snapshot refresh for a ticker. The update is applied when the next `process_pending_orders()` runs. Use the **request → process → get** pattern when you need up-to-date market data or engine stats after processing.
+
+```python
+request_snapshot(ticker: str) -> bool
+```
+
+**Parameters:**
+- `ticker` (str): Stock symbol (must be registered).
+
+**Returns:** `True` if the ticker exists and the snapshot job was queued; `False` otherwise.
+
+**Pattern:** For fresh snapshot-derived data (best bid/ask, placed/filled counts, utilization, etc.), call `request_snapshot(ticker)` before `process_pending_orders()`, then call your getters (e.g. `get_best_bid`, `get_placed_count`) after processing.
+
+**Example:**
+```python
+runtime.request_snapshot("AAPL")
+runtime.process_pending_orders()
+bid = runtime.get_best_bid("AAPL")
+placed = runtime.get_placed_count("AAPL")
+```
+
+---
+
 #### process_pending_orders()
 
 Execute all pending orders.
@@ -207,12 +232,15 @@ process_pending_orders() -> None
 - Blocks until all workers complete
 - Must be called after order submission
 - Processes orders across all stocks in parallel
+- For up-to-date snapshot data after processing, call `request_snapshot(ticker)` before `process_pending_orders()`, then read market/stats (see **request_snapshot()**).
 
 **Example:**
 ```python
 runtime.submit_limit_order("AAPL", "BID", 149.50, 100.0)
 runtime.submit_limit_order("MSFT", "BID", 299.50, 50.0)
-runtime.process_pending_orders()  # Execute both
+runtime.request_snapshot("AAPL")
+runtime.request_snapshot("MSFT")
+runtime.process_pending_orders()  # Execute both; snapshot caches updated
 ```
 
 ---
@@ -278,6 +306,8 @@ print(runtime.get_record("AAPL"))  # True
 runtime.set_record("AAPL", False)  # Stop recording
 ```
 
+**See also:** [L2 Data and Recording](l2_data_and_recording.md) – When to use runtime snapshots vs an incremental stream for replay and analysis.
+
 ---
 
 #### get_order()
@@ -334,7 +364,7 @@ unregister_strategy(user_id: int) -> bool
 
 #### get_market_price()
 
-Get current market price (last trade).
+Get current market price (last trade). Value comes from the snapshot cache. For data that reflects the just-processed orders, use **request_snapshot(ticker)** before **process_pending_orders()**, then call this getter.
 
 ```python
 get_market_price(ticker: str) -> float
@@ -348,6 +378,8 @@ get_market_price(ticker: str) -> float
 
 **Example:**
 ```python
+runtime.request_snapshot("AAPL")
+runtime.process_pending_orders()
 price = runtime.get_market_price("AAPL")
 print(f"AAPL: ${price:.2f}")
 ```
@@ -356,7 +388,7 @@ print(f"AAPL: ${price:.2f}")
 
 #### get_best_bid() / get_best_ask()
 
-Get best bid or ask price.
+Get best bid or ask price. Values come from the snapshot cache. For data that reflects the just-processed orders, use **request_snapshot(ticker)** before **process_pending_orders()**, then call these getters.
 
 ```python
 get_best_bid(ticker: str) -> float
@@ -371,6 +403,8 @@ get_best_ask(ticker: str) -> float
 
 **Example:**
 ```python
+runtime.request_snapshot("AAPL")
+runtime.process_pending_orders()
 bid = runtime.get_best_bid("AAPL")
 ask = runtime.get_best_ask("AAPL")
 spread = ask - bid
@@ -426,6 +460,29 @@ print(f"User 100 has {len(orders)} open AAPL orders")
 
 ---
 
+#### get_active_orders()
+
+Get a user's active (open, unfilled, uncancelled) order IDs for a stock.
+
+```python
+get_active_orders(user_id: int, ticker: str) -> List[int]
+```
+
+**Parameters:**
+- `user_id` (int): User identifier
+- `ticker` (str): Stock symbol
+
+**Returns:**
+- `List[int]`: List of active order IDs
+
+**Example:**
+```python
+active = runtime.get_active_orders(user_id=100, ticker="AAPL")
+print(f"User 100 has {len(active)} active AAPL orders")
+```
+
+---
+
 #### Statistics Methods
 
 ```python
@@ -435,10 +492,12 @@ get_cancelled_count(ticker: str) -> int
 get_open_count(ticker: str) -> int
 ```
 
-**Returns:** Count of orders by state
+**Returns:** Count of orders by state. Values come from the snapshot cache. For counts that reflect the just-processed orders, call **request_snapshot(ticker)** before **process_pending_orders()**, then these getters.
 
 **Example:**
 ```python
+runtime.request_snapshot("AAPL")
+runtime.process_pending_orders()
 print(f"Placed: {runtime.get_placed_count('AAPL')}")
 print(f"Filled: {runtime.get_filled_count('AAPL')}")
 print(f"Open: {runtime.get_open_count('AAPL')}")
@@ -534,7 +593,7 @@ class L3Event:
 
 ### TradingStrategy
 
-Base class for trading strategies.
+Optional base class that provides callback hooks (e.g. on_order_fill, on_market_data). Use it if you want event-driven callbacks; you can also use a plain callable with `register_strategy()`. How you implement trading logic is up to you.
 
 #### Constructor
 
@@ -550,7 +609,7 @@ TradingStrategy(runtime: EngineRuntime, user_id: int)
 
 #### Callback Methods
 
-Override these in your strategy:
+Optional hooks; override only what you use:
 
 ```python
 def on_order_accept(ticker: str, order_id: int, side: str, price: float, qty: float):
@@ -586,12 +645,12 @@ def on_stop():
     pass
 ```
 
-**Example:**
+**Example (minimal; illustrates the hook only):**
 ```python
 class MyStrategy(TradingStrategy):
     def on_market_data(self, ticker, best_bid, best_ask):
-        mid = (best_bid + best_ask) / 2
-        self.runtime.submit_limit_order(ticker, "BID", mid - 0.05, 100.0, self.user_id)
+        # Your logic here
+        pass
 ```
 
 ---

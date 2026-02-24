@@ -41,8 +41,19 @@ env/
 # C++ build artifacts (object files, test binaries)
 *.o
 *.out
+*.dSYM/
 *.a
 *.dylib
+# Test binaries (no extension, from -o ${fileBasenameNoExtension})
+/core/test/engine_runtime_test
+/core/test/order_test
+/core/test/scheduler_test
+/core/test/strategy_test
+/core/test/strategy_realdata_test
+/core/test/parser_test
+/core/test/diagnostics_test
+/core/test/example_test
+/core/test/order_inspection_test
 
 # IDE / editor
 .cursor/

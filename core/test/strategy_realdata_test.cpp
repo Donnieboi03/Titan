@@ -254,10 +254,20 @@ void test_strategy_with_real_data(const std::string& data_file, const std::strin
     std::cout << "Market Updates Received: " << strategy_stats.market_updates << "\n";
     std::cout << "Best Price Seen: $" << strategy_stats.best_price_seen << "\n\n";
     
-    // Get final market state
-    double final_bid = runtime.get_best_bid(ticker);
-    double final_ask = runtime.get_best_ask(ticker);
-    double market_price = runtime.get_market_price(ticker);
+    // Get final market state (request → process → get for fresh snapshot)
+    runtime.request_snapshot(ticker);
+    runtime.process_pending_orders();
+    const auto* snap_final = runtime.get_snapshot(ticker);
+    double final_bid = -1.0, final_ask = -1.0, market_price = -1.0;
+    if (snap_final) {
+        if (snap_final->best_bid != static_cast<engine::Price>(-1)) final_bid = backtest::math::ticks_to_dollars(snap_final->best_bid);
+        if (snap_final->best_ask != static_cast<engine::Price>(-1)) final_ask = backtest::math::ticks_to_dollars(snap_final->best_ask);
+        if (snap_final->best_bid != static_cast<engine::Price>(-1) && snap_final->best_ask != static_cast<engine::Price>(-1))
+            market_price = (backtest::math::ticks_to_dollars(snap_final->best_bid) + backtest::math::ticks_to_dollars(snap_final->best_ask)) / 2.0;
+        else if (snap_final->best_ask != static_cast<engine::Price>(-1)) market_price = backtest::math::ticks_to_dollars(snap_final->best_ask);
+        else if (snap_final->best_bid != static_cast<engine::Price>(-1)) market_price = backtest::math::ticks_to_dollars(snap_final->best_bid);
+        else if (snap_final->market_price != static_cast<engine::Price>(-1)) market_price = backtest::math::ticks_to_dollars(snap_final->market_price);
+    }
     
     std::cout << "=== Final Market State ===\n";
     std::cout << "Market Price: $" << market_price << "\n";
@@ -266,9 +276,17 @@ void test_strategy_with_real_data(const std::string& data_file, const std::strin
     std::cout << "Spread: $" << (final_ask - final_bid) << "\n\n";
     
     // Show market depth
-    auto bid_depth = runtime.get_market_depth(ticker, OrderSide::BID, 5);
-    auto ask_depth = runtime.get_market_depth(ticker, OrderSide::ASK, 5);
-    
+    std::vector<std::pair<double, double>> bid_depth, ask_depth;
+    if (snap_final) {
+        size_t n_bid = std::min(static_cast<size_t>(snap_final->bid_levels), size_t(5));
+        bid_depth.reserve(n_bid);
+        for (size_t i = 0; i < n_bid; ++i)
+            bid_depth.emplace_back(backtest::math::ticks_to_dollars(snap_final->bid_prices[i]), backtest::math::internal_to_qty(snap_final->bid_depth[i]));
+        size_t n_ask = std::min(static_cast<size_t>(snap_final->ask_levels), size_t(5));
+        ask_depth.reserve(n_ask);
+        for (size_t i = 0; i < n_ask; ++i)
+            ask_depth.emplace_back(backtest::math::ticks_to_dollars(snap_final->ask_prices[i]), backtest::math::internal_to_qty(snap_final->ask_depth[i]));
+    }
     std::cout << "Top 5 Bids:\n";
     for (size_t i = 0; i < bid_depth.size(); ++i) {
         std::cout << "  $" << bid_depth[i].first << " (" << bid_depth[i].second << ")\n";
@@ -295,10 +313,11 @@ void test_strategy_with_real_data(const std::string& data_file, const std::strin
     std::cout << "  Position: " << taker->get_position(ticker) << " shares\n";
     std::cout << "  Unrealized P&L: $" << taker->get_unrealized_pnl(ticker, market_price) << "\n";
     
-    // Get engine statistics
-    uint64_t placed = runtime.get_placed_count(ticker);
-    uint64_t filled = runtime.get_filled_count(ticker);
-    uint64_t cancelled = runtime.get_cancelled_count(ticker);
+    // Get engine statistics (reuse snap_final from request → process → get above)
+    const auto* snap = snap_final;
+    uint64_t placed = snap ? static_cast<uint64_t>(snap->placed_count) : 0;
+    uint64_t filled = snap ? static_cast<uint64_t>(snap->filled_count) : 0;
+    uint64_t cancelled = snap ? static_cast<uint64_t>(snap->cancelled_count) : 0;
     
     std::cout << "\n=== Engine Statistics ===\n";
     std::cout << "Total Orders Placed: " << placed << "\n";
@@ -313,7 +332,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Testing strategy execution with market data parser\n";
     
     // Default to binary file if available
-    std::string data_file = "../../core/test/examples/binance-futures_incremental_book_L2_2024-12-01_BTCUSDT.bin";
+    std::string data_file = "core/test/examples/binance-futures_incremental_book_L2_2024-12-01_BTCUSDT.bin";
     std::string ticker = "BTCUSDT";
     
     if (argc >= 2) {

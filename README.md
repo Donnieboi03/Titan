@@ -93,7 +93,7 @@ Step 3 compiles the C++ core and creates the `titan` Python package. No separate
 
 ```bash
 python -c "import titan; print(titan.__version__)"
-# Expected: 1.0.0
+# Expected: 1.1.0
 ```
 
 **🐳 Docker (alternative)**

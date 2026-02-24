@@ -109,11 +109,15 @@ void test_order_inspection() {
     manager->submit_limit_order(ticker, OrderSide::ASK, 101.0, 10.0);
     manager->submit_limit_order(ticker, OrderSide::ASK, 102.0, 10.0);
     
+    runtime.request_snapshot(ticker);
     runtime.process_pending_orders();
     
     std::cout << "Manager placed 4 initial orders\n";
-    std::cout << "Best Bid: $" << runtime.get_best_bid(ticker) << "\n";
-    std::cout << "Best Ask: $" << runtime.get_best_ask(ticker) << "\n\n";
+    const auto* snap = runtime.get_snapshot(ticker);
+    double best_bid = snap && snap->best_bid != static_cast<engine::Price>(-1) ? backtest::math::ticks_to_dollars(snap->best_bid) : -1.0;
+    double best_ask = snap && snap->best_ask != static_cast<engine::Price>(-1) ? backtest::math::ticks_to_dollars(snap->best_ask) : -1.0;
+    std::cout << "Best Bid: $" << best_bid << "\n";
+    std::cout << "Best Ask: $" << best_ask << "\n\n";
     
     // Inspect the orders
     auto order_ids = manager->get_positions(ticker);

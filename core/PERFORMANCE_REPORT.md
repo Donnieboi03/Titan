@@ -3,7 +3,9 @@
 **Last updated:** February 2026  
 **Platform:** macOS (Apple Silicon M1/M2)  
 **Compiler:** clang++ with -O3 optimization  
-**C++ Standard:** C++20
+**C++ Standard:** C++20  
+
+**Benchmarks:** Run without CMake: compile `core/test/order_test.cpp` and `core/test/engine_runtime_test.cpp` with `clang++ -std=c++20 -O3 -I..` (engine_runtime_test also needs `-I/opt/homebrew/include -lz`). Then run `./order_test` and `./engine_runtime_test` for throughput numbers. Multi-stock test uses **4 workers, 8 stocks** (see `NUM_WORKERS` / `NUM_STOCKS` in `engine_runtime_test.cpp`).
 
 ---
 
@@ -13,11 +15,11 @@ The Titan backtesting engine demonstrates exceptional performance across all thr
 
 | Component | Peak Throughput | Notes |
 |-----------|----------------|-------|
-| **OrderEngine** | 56.82M ops/sec | Single-threaded, no matching |
-| **OrderEngine** | 9.65M ops/sec | Single-threaded, with matching |
+| **OrderEngine** | 58.14M ops/sec | Single-threaded, no matching |
+| **OrderEngine** | 9.73M ops/sec | Single-threaded, with matching |
 | **JobScheduler** | 246.12M jobs/sec | 2 workers, async multi-batch |
-| **EngineRuntime** | 7.80M orders/sec (single) | 1 worker, 1 stock, end-to-end |
-| **EngineRuntime** | 27.73M orders/sec (multi) | 8 workers, 8 stocks, end-to-end |
+| **EngineRuntime** | 7.31M orders/sec (single) | 1 worker, 1 stock, end-to-end |
+| **EngineRuntime** | 26.62M orders/sec (multi) | 4 workers, 8 stocks, end-to-end |
 
 ---
 
@@ -27,20 +29,20 @@ The Titan backtesting engine demonstrates exceptional performance across all thr
 
 | Operation | Throughput | Test Scenario |
 |-----------|-----------|---------------|
-| **Placement (matching)** | 9.65M ops/sec | Immediate fill, slot reuse |
-| **Placement (no match)** | 56.82M ops/sec | Orders remain open |
+| **Placement (matching)** | 9.73M ops/sec | Immediate fill, slot reuse |
+| **Placement (no match)** | 58.14M ops/sec | Orders remain open |
 | **Cancel** | 0.00M ops/sec | (Not measured in latest test) |
 | **Edit** | 62.50M ops/sec | Modify price/quantity |
 
 ### Memory Efficiency Test
 - **Capacity:** 1,048,576 slots (24 MB)
 - **Orders Processed:** 10,000,000
-- **Time:** 885 ms
-- **Throughput:** 11.30M orders/sec
+- **Time:** 906 ms
+- **Throughput:** 11.04M orders/sec
 - **Memory Savings:** 90% (24 MB vs 228 MB without slot reuse)
 
 ### Matching Performance
-- **Full Match Throughput:** 9.65M ops/sec
+- **Full Match Throughput:** 9.73M ops/sec
 - **Partial Match Handling:** ✓ Correct FIFO behavior
 - **Price-Time Priority:** ✓ Verified
 - **Slot Reuse Efficiency:** 100% (freed 100/100 matched orders)
@@ -83,8 +85,8 @@ The Titan backtesting engine demonstrates exceptional performance across all thr
 ### Single-Stock Stress Test
 - **Configuration:** 1 worker, 1 stock, 1M capacity
 - **Orders Processed:** 10,000,000
-- **End-to-End Time:** 1,282 milliseconds
-- **End-to-End Throughput:** 7.80M orders/sec
+- **End-to-End Time:** 1,369 milliseconds
+- **End-to-End Throughput:** 7.31M orders/sec
 - **Filled Orders:** 9,704,001 (97% fill rate with matching)
 - **Open Orders:** 296,000
 - **Memory Footprint:** 11 MB (1M capacity)
@@ -92,11 +94,11 @@ The Titan backtesting engine demonstrates exceptional performance across all thr
 > **Note**: Previous measurements of 388M orders/sec were measuring only scheduler synchronization time, not actual order processing. Corrected measurements show end-to-end throughput including submission + matching.
 
 ### Multi-Stock Concurrent Test
-- **Configuration:** 8 workers, 8 stocks, 1M capacity per stock
+- **Configuration:** 4 workers, 8 stocks, 1M capacity per stock
 - **Orders per Stock:** 10,000,000
 - **Total Orders:** 80,000,000
-- **End-to-End Time:** 2.89 seconds
-- **End-to-End Throughput:** 27.73M orders/sec
+- **End-to-End Time:** 3.01 seconds
+- **End-to-End Throughput:** 26.62M orders/sec
 - **Fill Rate:** 97.5% (with matching enabled)
 - **Aggregate Results:**
   - Placed: 80,000,008
@@ -104,7 +106,7 @@ The Titan backtesting engine demonstrates exceptional performance across all thr
   - Open: 2,012,325
   - Memory: ~256 MB (8 engines)
 
-> **Note**: Multi-stock performance improved 80% (15M → 27M orders/sec) after fixing false sharing issues with cache-line alignment on atomics and hot counters.
+> **Note**: Multi-stock test uses **4 workers** for 8 stocks (2 stocks per worker). Performance improved 80% (15M → ~27M orders/sec) after fixing false sharing with cache-line alignment.
 
 ### Async Processing Test (50 orders)
 - **Processing Time:** 18 microseconds
@@ -139,8 +141,8 @@ The Titan backtesting engine demonstrates exceptional performance across all thr
 
 1. **OrderEngine:** Single-threaded matching is the bottleneck
    - CPU-bound for order matching
-   - **7.80M orders/sec** per stock (end-to-end with matching)
-   - **56.82M ops/sec** theoretical without matching
+   - **7.31M orders/sec** per stock (end-to-end with matching)
+   - **58.14M ops/sec** theoretical without matching
    - Memory-bound for large order books
 
 2. **JobScheduler:** Minimal overhead
@@ -151,13 +153,13 @@ The Titan backtesting engine demonstrates exceptional performance across all thr
 
 3. **False Sharing:** Fixed with cache-line alignment
    - **Before**: 15M orders/sec multi-stock
-   - **After**: 27M orders/sec multi-stock (80% improvement)
+   - **After**: ~26.6M orders/sec multi-stock (4 workers, 8 stocks)
    - **Solution**: CACHE_LINE (128-byte) alignment on atomics and hot counters
    - Prevented different threads from invalidating each other's cache lines
 
 4. **Memory Bandwidth:** Secondary concern
-   - 8 workers don't saturate memory controller with proper alignment
-   - OrderInfo: 32 bytes × 7.80M = 250 MB/sec per stock
+   - 4 workers (2 stocks per worker) don't saturate memory controller with proper alignment
+   - OrderInfo: 32 bytes × 7.31M = 234 MB/sec per stock
 
 ### Optimization Opportunities
 
@@ -201,7 +203,7 @@ Total RAM = num_stocks × capacity × 32 bytes
 ```
 
 ### Throughput vs Fill Rate
-- **High matching (97–98% fill):** ~7.8M orders/sec (single stock), ~27.7M orders/sec (8 stocks, 8 workers)
+- **High matching (97–98% fill):** ~7.3M orders/sec (single stock), ~26.6M orders/sec (8 stocks, 4 workers)
 - **Slot reuse critical:** Matching frees capacity
 - **No matching:** Throughput limited by capacity exhaustion
 
@@ -227,13 +229,13 @@ Total RAM = num_stocks × capacity × 32 bytes
 
 | System | Throughput | Notes |
 |--------|-----------|-------|
-| **Titan OrderEngine** | 7.80M orders/sec | Single stock, end-to-end with matching |
-| **Titan Multi-Stock** | 27.73M orders/sec | 8 workers, 8 stocks, 97.5% fill rate |
+| **Titan OrderEngine** | 7.31M orders/sec | Single stock, end-to-end with matching |
+| **Titan Multi-Stock** | 26.62M orders/sec | 4 workers, 8 stocks, 97.5% fill rate |
 | **Typical Exchange** | 1-10M orders/sec | Including network, validation, settlement |
 | **HFT Research** | 100K-1M ops/sec | Real-world with network latency |
 | **NASDAQ** | ~10M orders/sec | Peak capacity |
 
-**Conclusion:** Titan's 8-worker configuration delivers 27M orders/sec aggregate throughput with 97.5% fill rate, exceeding typical backtesting requirements by 5-10x and matching production exchange capacity. Suitable for Monte Carlo simulations and high-frequency strategy testing.
+**Conclusion:** Titan's 4-worker, 8-stock configuration delivers ~26.6M orders/sec aggregate throughput with 97.5% fill rate, exceeding typical backtesting requirements by 5-10x and matching production exchange capacity. Suitable for Monte Carlo simulations and high-frequency strategy testing.
 
 ---
 
@@ -285,7 +287,7 @@ Total RAM = num_stocks × capacity × 32 bytes
 2. **Use native architecture flags:** -march=native
 3. **Profile-guided optimization (PGO):** Additional 10-20% gains
 4. **Capacity Planning:** Set capacity = 2x expected concurrent open orders
-5. **Thread Count:** **Use 8 workers** for maximum throughput (false sharing fixed)
+5. **Thread Count:** **Use 4 workers** in the shipped multi-stock stress test (8 stocks); for maximum throughput with more stocks, scale workers as needed (false sharing fixed)
 6. **Memory:** 1M capacity per stock = ~32 MB per engine (256 MB total for 8 stocks)
 7. **Disable Verbose:** Set verbose=false to eliminate event management overhead
 8. **Cache-Line Alignment:** See [Optimizing for Your System](#optimizing-for-your-system) below.
@@ -308,16 +310,12 @@ for (const auto& ticker : tickers) {
 
 **Expected Performance:**
 - **Single stock**: 7.80M orders/sec
-- **8 stocks (8 workers)**: 27.73M orders/sec aggregate (97.5% fill rate)
+- **8 stocks (4 workers)**: 26.62M orders/sec aggregate (97.5% fill rate)
 - **Memory**: ~256 MB total (8 × 32 MB)
 - **Latency**: ~128 μs per order (end-to-end)
 
 ### For Further Development
-1. **Reduce event management contention:** e.g. sleep lock for event management thread
-2. **Auto-match toggle:** integrate lazy queue / pending order state as needed
-3. **Consider SIMD:** vectorize matching logic (Highway is available in stack)
-4. **Add telemetry:** real-time performance monitoring
-5. **Benchmark on Intel/AMD:** verify cross-architecture performance
+1. **Benchmark on Intel/AMD:** verify cross-architecture performance.
 
 ### Optimizing for Your System
 

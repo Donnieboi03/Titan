@@ -109,6 +109,11 @@ spin_thread.join(timeout=2.0)
 
 print(f"   ✓ Submission completed in {elapsed:.3f}s; verifying counts...")
 
+# Request snapshots and process once so get_placed_count sees fresh data
+for t in TICKERS:
+    runtime.request_snapshot(t)
+runtime.process_pending_orders()
+
 # Verify placed counts roughly match total submissions
 expected_total = orders_per_thread * THREADS
 sum_placed = 0

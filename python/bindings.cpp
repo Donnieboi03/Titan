@@ -227,6 +227,7 @@ PYBIND11_MODULE(titan_core, m) {
         .def("list_tickers", &runtime::EngineRuntime::list_tickers)
         
         // Batch processing
+        .def("request_snapshot", &runtime::EngineRuntime::request_snapshot, py::arg("ticker"))
         .def("process_pending_orders", 
              py::overload_cast<>(&runtime::EngineRuntime::process_pending_orders),
              py::call_guard<py::gil_scoped_release>())
@@ -301,6 +302,8 @@ PYBIND11_MODULE(titan_core, m) {
         .def("get_pending_count", &runtime::EngineRuntime::get_pending_count, py::arg("ticker"))
         .def("order_exists", &runtime::EngineRuntime::order_exists,
              py::arg("ticker"), py::arg("order_id"))
+        .def("get_positions", &runtime::EngineRuntime::get_positions, py::arg("user_id"), py::arg("ticker"))
+        .def("get_active_orders", &runtime::EngineRuntime::get_active_orders, py::arg("user_id"), py::arg("ticker"))
         
         // Strategy management
         .def("unregister_strategy", &runtime::EngineRuntime::unregister_strategy,
