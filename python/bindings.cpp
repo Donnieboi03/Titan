@@ -183,7 +183,9 @@ PYBIND11_MODULE(titan_core, m) {
         .def("get_capital", &user::User::get_capital)
         .def("get_realized_pnl", &user::User::get_realized_pnl)
         .def("get_unrealized_pnl", &user::User::get_unrealized_pnl)
-        .def("get_total_volume", &user::User::get_total_volume);
+        .def("get_total_volume", &user::User::get_total_volume)
+        .def("get_open_bids", &user::User::get_open_bids)
+        .def("get_open_asks", &user::User::get_open_asks);
 
     // get_order: return a copy (or None) so Python can hold it safely; C++ returns pointer
     auto get_order_fn = [](runtime::EngineRuntime& self, const std::string& ticker, engine::OrderId order_id) -> py::object {

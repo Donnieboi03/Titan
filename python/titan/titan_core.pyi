@@ -268,6 +268,12 @@ class User(UserView):
     def get_total_volume(self) -> float:
         """Return total traded volume (sum of all fill quantities)."""
         ...
+    def get_open_bids(self) -> List[Tuple[float, float]]:
+        """Return list of (qty, price) for open BID orders (strategy ticker)."""
+        ...
+    def get_open_asks(self) -> List[Tuple[float, float]]:
+        """Return list of (qty, price) for open ASK orders (strategy ticker)."""
+        ...
 
 
 # ---------------------------------------------------------------------------
