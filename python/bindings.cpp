@@ -182,7 +182,7 @@ PYBIND11_MODULE(titan_core, m) {
         .def("get_user_id", &user::User::get_user_id)
         .def("get_capital", &user::User::get_capital)
         .def("get_realized_pnl", &user::User::get_realized_pnl)
-        .def("get_unrealized_pnl", &user::User::get_unrealized_pnl)
+        .def("get_unrealized_pnl", &user::UserView::get_unrealized_pnl)
         .def("get_total_volume", &user::User::get_total_volume)
         .def("get_open_bids", &user::User::get_open_bids)
         .def("get_open_asks", &user::User::get_open_asks);

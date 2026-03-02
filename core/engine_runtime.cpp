@@ -331,14 +331,13 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_limit_order_async_impl(
                         case engine::EventKind::ACCEPT:
                             runtime_ptr->handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, price_ticks);
                             break;
-                        case engine::EventKind::FILL:
-                        case engine::EventKind::PARTIAL_FILL:
-                            runtime_ptr->handle_fill_event(msg, engine_id);
-                            break;
                         default:
                             break;
                     }
                 }
+                // Always process FILL/PARTIAL_FILL so strategy orders filled by this (e.g. L2) order are removed from by_user
+                if (msg.kind == engine::EventKind::FILL || msg.kind == engine::EventKind::PARTIAL_FILL)
+                    runtime_ptr->handle_fill_event(msg, engine_id);
             }
         }
         
@@ -434,8 +433,10 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_limit_order_sync_impl(c
                     if (msg.kind == engine::EventKind::ACCEPT) {
                         handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, price_ticks);
                     }
-                    handle_fill_event(msg, engine_id);
                 }
+                // Always process FILL/PARTIAL_FILL so strategy orders filled by this (e.g. L2) order are removed from by_user
+                if (msg.kind == engine::EventKind::FILL || msg.kind == engine::EventKind::PARTIAL_FILL)
+                    handle_fill_event(msg, engine_id);
             }
         }
         
@@ -549,14 +550,13 @@ engine::OrderId backtest::runtime::EngineRuntime::submit_market_order_async_impl
                         case engine::EventKind::ACCEPT:
                             runtime_ptr->handle_accept_event(order_id, user_id, engine_id, _side, qty_ticks, market_price);
                             break;
-                        case engine::EventKind::FILL:
-                        case engine::EventKind::PARTIAL_FILL:
-                            runtime_ptr->handle_fill_event(msg, engine_id);
-                            break;
                         default:
                             break;
                     }
                 }
+                // Always process FILL/PARTIAL_FILL so strategy orders filled by this (e.g. L2) order are removed from by_user
+                if (msg.kind == engine::EventKind::FILL || msg.kind == engine::EventKind::PARTIAL_FILL)
+                    runtime_ptr->handle_fill_event(msg, engine_id);
             }
         }
         
@@ -2562,7 +2562,7 @@ void backtest::user::User::update_snapshot() noexcept
     snap.position = position_;
     snap.avg_price = avg_price_;
     double price = (runtime_ && strategy_engine_id_ != backtest::runtime::INVALID_ENGINE_ID) ? runtime_->get_market_price(runtime_->get_ticker(strategy_engine_id_)) : 0.0;
-    snap.unrealized_pnl = get_unrealized_pnl(price);
+    snap.unrealized_pnl = calculate_unrealized_pnl(price);
     active_snapshot_index_.store(write_idx, std::memory_order_release);
     published_snapshot_ptr_.store(&snapshots_[write_idx], std::memory_order_release);
 }

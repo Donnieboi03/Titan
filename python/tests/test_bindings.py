@@ -125,8 +125,15 @@ def test_strategy_registration():
     position = trader.get_position()
     active_orders = runtime.get_active_orders(trader.get_user_id(), "TSLA")
 
+    # Ensure get_realized_pnl() and get_unrealized_pnl() are callable with no args (snapshot-based)
+    realized = trader.get_realized_pnl()
+    unrealized = trader.get_unrealized_pnl()
+    assert isinstance(realized, (int, float)), "get_realized_pnl() should return a number"
+    assert isinstance(unrealized, (int, float)), "get_unrealized_pnl() should return a number"
+
     print(f"✓ Trader capital: ${capital:.2f}")
     print(f"✓ Trader position: {position:.2f} shares")
+    print(f"✓ Trader realized PnL: ${realized:.2f}, unrealized PnL: ${unrealized:.2f}")
     print(f"✓ Active orders: {len(active_orders)}")
 
     print("\n")

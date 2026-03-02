@@ -125,10 +125,10 @@ namespace backtest
             inline std::vector<engine::OrderId> get_positions() const;
             inline std::vector<engine::OrderId> get_active_orders() const;
             inline bool has_sufficient_shares(engine::Quantity qty) const;
-            inline double get_unrealized_pnl(double current_price) const;
             inline const engine::OrderInfo* get_order_info(engine::OrderId order_id) const;
 
         private:
+            inline double calculate_unrealized_pnl(double current_price) const;
             inline void update_position(double qty, double price);
             inline void update_realized_pnl(double pnl);
             void reserve_on_accept(engine::OrderId order_id, engine::OrderSide side, double qty, double price);
@@ -452,7 +452,7 @@ namespace backtest
             return runtime_ && strategy_engine_id_ != backtest::runtime::INVALID_ENGINE_ID ? runtime_->get_order(strategy_engine_id_, order_id) : nullptr;
         }
 
-        inline double User::get_unrealized_pnl(double current_price) const
+        inline double User::calculate_unrealized_pnl(double current_price) const
         {
             return position_ * (current_price - avg_price_);
         }
