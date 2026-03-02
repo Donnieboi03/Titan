@@ -44,7 +44,8 @@ env/
 *.dSYM/
 *.a
 *.dylib
-# Test binaries (no extension, from -o ${fileBasenameNoExtension})
+# Test output and binaries (no extension, from -o ${fileBasenameNoExtension})
+*_output.txt
 /core/test/engine_runtime_test
 /core/test/order_test
 /core/test/scheduler_test

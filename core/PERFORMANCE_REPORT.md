@@ -297,9 +297,11 @@ Total RAM = num_stocks × capacity × 32 bytes
 EngineRuntime::reset_instance();  // if reinitializing
 auto& runtime = EngineRuntime::get_instance(
     8,          // num_threads: workers for maximum throughput (false sharing fixed)
-    1048576,    // capacity: 1M orders per engine
     false,      // verbose: disable for production
-    1000        // quantum: scheduling quantum (optional, default 1000)
+    1000,       // quantum: scheduling quantum (optional, default 1000)
+    1048576,    // max_capacity: 1M orders per engine
+    100,        // max_engine_count (optional, default 100)
+    1000        // max_strategies (optional, default 1000)
 );
 
 // Register 8+ stocks (round-robin distribution)

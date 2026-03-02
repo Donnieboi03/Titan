@@ -23,6 +23,10 @@ try:
         OrderStatus,
         INVALID_USER_ID
     )
+    if not hasattr(EngineRuntime, "reset_instance"):
+        print("✗ Titan extension not built (running with placeholders).")
+        print("  Build the extension first: pip install -e .")
+        sys.exit(1)
     print("✓ Successfully imported Titan C++ extension\n")
 except ImportError as e:
     print(f"✗ Failed to import Titan extension: {e}")
@@ -38,7 +42,7 @@ def test_basic_functionality():
 
     # Reset and create runtime
     EngineRuntime.reset_instance()
-    runtime = EngineRuntime.get_instance(num_threads=2, capacity=1024*1024, verbose=False)
+    runtime = EngineRuntime.get_instance(num_threads=2, max_capacity=1024*1024, verbose=False)
     print("✓ Created runtime instance")
 
     # Register stock
@@ -93,22 +97,18 @@ def test_strategy_registration():
     runtime = EngineRuntime.get_instance(num_threads=1, quantum=100)
     runtime.register_stock("TSLA", 700.0, 500.0)
 
-    # Define Python strategy
+    # Define Python strategy (bound to one ticker; no ticker arg in User methods)
     def my_strategy(user: User):
-        tickers = user.list_tickers()
-        for ticker in tickers:
-            bid = user.get_best_bid(ticker)
-            ask = user.get_best_ask(ticker)
-
-            if bid > 0 and ask > 0:
-                mid = (bid + ask) / 2.0
-                # Place orders around mid price
-                user.submit_limit_order(ticker, "BID", mid - 1.0, 10.0)
-                user.submit_limit_order(ticker, "ASK", mid + 1.0, 10.0)
+        bid = user.get_best_bid()
+        ask = user.get_best_ask()
+        if bid > 0 and ask > 0:
+            mid = (bid + ask) / 2.0
+            user.submit_limit_order("BID", mid - 1.0, 10.0)
+            user.submit_limit_order("ASK", mid + 1.0, 10.0)
 
     # Register strategy for this ticker
     trader = runtime.register_strategy("TSLA", my_strategy, starting_capital=50000.0)
-    assert trader is not None, "register_strategy should return a User when ticker exists"
+    assert trader is not None, "register_strategy should return a UserView when ticker exists"
     print(f"✓ Registered strategy, User ID: {trader.get_user_id()}")
     print(f"✓ Starting capital: ${trader.get_capital():.2f}")
 
@@ -120,10 +120,10 @@ def test_strategy_registration():
     runtime.request_snapshot("TSLA")
     runtime.process_pending_orders()
 
-    # Check trader's positions
+    # Check trader's positions (UserView: get_capital, get_position; order IDs via runtime)
     capital = trader.get_capital()
-    position = trader.get_position("TSLA")
-    active_orders = trader.get_active_orders("TSLA")
+    position = trader.get_position()
+    active_orders = runtime.get_active_orders(trader.get_user_id(), "TSLA")
 
     print(f"✓ Trader capital: ${capital:.2f}")
     print(f"✓ Trader position: {position:.2f} shares")
@@ -179,31 +179,23 @@ def test_order_management():
     runtime = EngineRuntime.get_instance()
     runtime.register_stock("SPY", 450.0, 1000.0)
 
-    # Strategy that manages orders
+    # Strategy that manages orders (bound to one ticker)
     def order_manager(user: User):
-        tickers = user.list_tickers()
-        for ticker in tickers:
-            bid = user.get_best_bid(ticker)
-            ask = user.get_best_ask(ticker)
-
-            if bid <= 0 or ask <= 0:
-                continue
-
-            mid = (bid + ask) / 2.0
-
-            # Cancel orders far from market
-            active_orders = user.get_active_orders(ticker)
-            for order_id in active_orders:
-                info = user.get_order_info(ticker, order_id)
-                if info:
-                    order_price = info.get_price_dollars()
-                    distance = abs(order_price - mid)
-                    if distance > 5.0:  # More than $5 away
-                        user.submit_cancel_order(ticker, order_id)
-
-            # Place new orders
-            user.submit_limit_order(ticker, "BID", mid - 2.0, 5.0)
-            user.submit_limit_order(ticker, "ASK", mid + 2.0, 5.0)
+        bid = user.get_best_bid()
+        ask = user.get_best_ask()
+        if bid <= 0 or ask <= 0:
+            return
+        mid = (bid + ask) / 2.0
+        active_orders = user.get_active_orders()
+        for order_id in active_orders:
+            info = user.get_order_info(order_id)
+            if info:
+                order_price = info.get_price_dollars()
+                distance = abs(order_price - mid)
+                if distance > 5.0:
+                    user.submit_cancel_order(order_id)
+        user.submit_limit_order("BID", mid - 2.0, 5.0)
+        user.submit_limit_order("ASK", mid + 2.0, 5.0)
 
     manager = runtime.register_strategy("SPY", order_manager, 100000.0)
     print(f"✓ Registered order manager, User ID: {manager.get_user_id()}")
@@ -216,19 +208,19 @@ def test_order_management():
     runtime.request_snapshot("SPY")
     runtime.process_pending_orders()
 
-    # Check orders
-    active_orders = manager.get_active_orders("SPY")
+    # Check orders (UserView: use runtime for order IDs)
+    active_orders = runtime.get_active_orders(manager.get_user_id(), "SPY")
     print(f"✓ Manager has {len(active_orders)} active orders")
 
     if active_orders:
         order_id = active_orders[0]
-        info = manager.get_order_info("SPY", order_id)
+        info = runtime.get_order("SPY", order_id)
         if info:
             print(f"✓ Order #{order_id}: "
                   f"${info.get_price_dollars():.2f} x {info.get_qty():.2f} shares, "
                   f"Status={info.status}")
 
-        exists = runtime.order_exists("SPY", order_id)
+        exists = runtime.get_order("SPY", order_id) is not None
         print(f"✓ Order exists in engine: {exists}")
 
     print("\n")
@@ -253,14 +245,14 @@ def test_diagnostics():
 
     # Get diagnostics
     capacity = runtime.get_capacity("GOOGL")
-    utilization = runtime.get_utilization("GOOGL")
+    open_count = runtime.get_open_count("GOOGL")
     pending = runtime.get_pending_count("GOOGL")
     placed = runtime.get_placed_count("GOOGL")
     filled = runtime.get_filled_count("GOOGL")
 
     print(f"✓ Capacity: {capacity:,} orders")
-    print(f"✓ Utilization: {utilization} active orders")
-    print(f"✓ Utilization %: {utilization/capacity*100:.4f}%")
+    print(f"✓ Open orders: {open_count}")
+    print(f"✓ Utilization %: {open_count/capacity*100:.4f}%")
     print(f"✓ Pending: {pending} queued")
     print(f"✓ Placed: {placed}")
     print(f"✓ Filled: {filled}")

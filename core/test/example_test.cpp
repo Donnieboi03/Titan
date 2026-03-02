@@ -39,7 +39,7 @@ int main(int argc, char** argv)
     // Reset any existing singleton instance and create a fresh runtime
     backtest::runtime::EngineRuntime::reset_instance();
     // NOTE: quantum must be > 0 for strategies to be triggered. Use quantum = 4 here.
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(num_workers, capacity, false);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(num_workers, false, 4, capacity);  // quantum=4 for strategy triggers
 
     // Register a couple of stocks that the strategy can trade
     runtime.register_stock("EXM", 100.00, 1000.0); // example stock
@@ -84,8 +84,8 @@ int main(int argc, char** argv)
         }
     };
 
-    // Register the strategy for EXM (it can still trade ACME via the User API)
-    backtest::user::User* trader = runtime.register_strategy("EXM", complex_strategy);
+    // Register the strategy for EXM (returns UserView* — observational only)
+    backtest::user::UserView* trader = runtime.register_strategy("EXM", complex_strategy);
     if (!trader) {
         std::cerr << "Failed to register strategy/user" << std::endl;
         return 1;
@@ -113,12 +113,12 @@ int main(int argc, char** argv)
     runtime.request_snapshot("ACME");
     runtime.process_pending_orders();
 
-    // Now inspect results: positions, best bid/ask and PnL
-    auto exm_positions = trader->get_positions("EXM");
+    // Now inspect results via UserView (snapshot) and runtime for positions/market
+    auto exm_positions = runtime.get_positions(trader->get_user_id(), "EXM");
     std::cout << "Trader EXM open positions count: " << exm_positions.size() << "\n";
 
-    double best_bid = trader->get_best_bid("EXM");
-    double best_ask = trader->get_best_ask("EXM");
+    double best_bid = runtime.get_best_bid("EXM");
+    double best_ask = runtime.get_best_ask("EXM");
     std::cout << "Market EXM best bid: $" << best_bid << " best ask: $" << best_ask << "\n";
 
     std::cout << "Trader realized PnL: $" << trader->get_realized_pnl()
@@ -134,11 +134,11 @@ int main(int argc, char** argv)
                   << " Cancelled=" << (s ? s->cancelled_count : 0) << "\n";
     }
 
-    // Demonstrate how a client would cancel or edit orders via User wrapper
+    // Demonstrate how a client would cancel or edit orders via User (trader registered on EXM)
     if (!exm_positions.empty()) {
         engine::OrderId oid = exm_positions[0];
         std::cout << "Trader has order id " << oid << ", attempting to cancel it...\n";
-        bool cancelled = trader->submit_cancel_order("EXM", oid);
+        bool cancelled = static_cast<backtest::user::User*>(trader)->submit_cancel_order(oid);
         runtime.process_pending_orders();
         std::cout << "Cancel returned: " << (cancelled ? "submitted" : "rejected") << "\n";
     }

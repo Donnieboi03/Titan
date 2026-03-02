@@ -4,6 +4,7 @@
 #include "order_engine.h"
 #include <string>
 #include <vector>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 #include <cstdint>
@@ -12,7 +13,7 @@ namespace scheduler
 { 
     using WorkerId = std::size_t;
     class JobScheduler; 
-    class Job;
+    struct Job;
 }
 
 namespace backtest 
@@ -54,7 +55,23 @@ namespace backtest
         constexpr UserId IPO_HOLDER = 0; // User to hold IPO state
         constexpr UserId INVALID_USER_ID = static_cast<UserId>(-1);
 
-        class User; // forward
+        class User;   // forward
+        class UserView; // forward (observational-only handle; see engine_runtime.h)
+
+        // Lock-free user state snapshot for main-thread reads (double-buffered like MarketSnapshot).
+        // Single-ticker: each strategy is tied to one ticker at registration.
+        struct UserSnapshot
+        {
+            UserId user_id{INVALID_USER_ID};
+            double capital{0.0};
+            double realized_pnl{0.0};
+            double total_volume{0.0};
+            std::string ticker;
+            double position{0.0};
+            double avg_price{0.0};
+            double unrealized_pnl{0.0};
+        };
+
         // Strategy callback: use pointer to allow null-checks and match call-sites
         using Strategy = std::function<void(User*)>;
     }
@@ -62,6 +79,7 @@ namespace backtest
     namespace runtime 
     {
         using EngineId = std::uint32_t; // Id for each unique Engine
+        static constexpr EngineId INVALID_ENGINE_ID = static_cast<EngineId>(-1);
 
         class EngineRuntime; // forward declaration
 
@@ -72,25 +90,31 @@ namespace backtest
             std::size_t orders_placed{0};
             std::size_t orders_filled{0};
             std::size_t orders_cancelled{0};
+            std::size_t orders_edited{0};
+            std::size_t orders_replaced{0};
             
             // Performance metrics
             double simulation_time_seconds{0.0};
-            double orders_per_second{0.0};
-            double updates_per_second{0.0};
             
             // Engine utilization
             std::size_t peak_open_orders{0};
             std::size_t final_open_orders{0};
-            double average_utilization_percent{0.0};
             
             // Market data
             double initial_price{0.0};
             double final_price{0.0};
-            std::size_t unique_price_levels{0};
             
             // System metrics
             std::size_t cache_entries{0};
             bool simulation_running{false};
+            
+            // Computed rates (no storage; calculated when called)
+            double orders_per_second() const {
+                return (simulation_time_seconds > 0.0) ? static_cast<double>(orders_placed + orders_cancelled + orders_edited + orders_replaced) / simulation_time_seconds : 0.0;
+            }
+            double updates_per_second() const {
+                return (simulation_time_seconds > 0.0) ? static_cast<double>(market_updates_processed) / simulation_time_seconds : 0.0;
+            }
             
             // Reset all metrics for new simulation
             void reset() {
@@ -98,43 +122,59 @@ namespace backtest
                 orders_placed = 0;
                 orders_filled = 0;
                 orders_cancelled = 0;
+                orders_edited = 0;
+                orders_replaced = 0;
                 simulation_time_seconds = 0.0;
-                orders_per_second = 0.0;
-                updates_per_second = 0.0;
                 peak_open_orders = 0;
                 final_open_orders = 0;
-                average_utilization_percent = 0.0;
                 initial_price = 0.0;
                 final_price = 0.0;
-                unique_price_levels = 0;
                 cache_entries = 0;
                 simulation_running = false;
             }
         };
 
+        // Submit path: main thread reads (worker_id_, capacity_, ticker_, ipo_shares_)
+        struct alignas(engine::CACHE_LINE) OrderEngineInfoSubmitPath
+        {
+            scheduler::WorkerId worker_id_{0};
+            std::size_t capacity_{0};
+            std::string ticker_;
+            engine::Quantity ipo_shares_{0};
+        };
+
+        // Worker path: worker thread writes orders_since_quantum_, touches engine_
+        struct alignas(engine::CACHE_LINE) OrderEngineInfoWorkerPath
+        {
+            std::unique_ptr<engine::OrderEngine> engine_;
+            std::size_t orders_since_quantum_{0};
+            const engine::MarketSnapshot* snapshot_ptr_{nullptr};
+            std::unordered_map<engine::OrderId, user::UserId> order_to_user_;
+        };
+
+        // Engine-first: one per engine; by_user indexed by user_id
+        struct alignas(engine::CACHE_LINE) EngineOrders
+        {
+            std::vector<std::unordered_set<engine::OrderId>> by_user;
+        };
+
         struct OrderEngineInfo
         {
-            std::string ticker_; // Ticker string for this engine (cached for fast lookup)
-            std::unique_ptr<engine::OrderEngine> engine_;  // Engine Object (now pointer)
-            std::size_t capacity_; // Order pool capacity for this engine (used for simulate batch sizing)
-            std::size_t orders_since_quantum_{0}; // Per-engine quantum counter (worker-only access)
-            scheduler::WorkerId worker_id_; // Id for Worker
-            engine::Quantity ipo_shares_; // Initial IPO
-            
+            OrderEngineInfoSubmitPath submit_;
+            OrderEngineInfoWorkerPath worker_;
+            std::vector<std::size_t> user_indices_;  // indices into users_ for strategies on this engine
+
             // Cache-line aligned to prevent false sharing
             alignas(engine::CACHE_LINE) SimulationMetrics sim_metrics_[2];  // Double-buffered simulation metrics
             alignas(engine::CACHE_LINE) std::atomic<int> sim_metrics_index_{0};  // 0 or 1, which buffer readers see
-            
-            
+
             // Default Constructor
-            OrderEngineInfo()
-            :engine_(nullptr), capacity_(0)
-            {}
+            OrderEngineInfo() = default;
 
             // Constructor for in-place construction
             OrderEngineInfo(std::size_t capacity, bool verbose, engine::Quantity ipo_shares, scheduler::WorkerId worker_id, EngineId engine_id)
-                : engine_(std::make_unique<engine::OrderEngine>(capacity, verbose, true, static_cast<std::uint16_t>(engine_id))),
-                capacity_(capacity), ipo_shares_(ipo_shares), worker_id_(worker_id)
+                : submit_{ worker_id, capacity, {}, ipo_shares },
+                  worker_{ std::make_unique<engine::OrderEngine>(capacity, verbose, true, static_cast<std::uint16_t>(engine_id)), 0 }
             {}
             
             // Get writable metrics (for simulation/writer thread)
@@ -155,28 +195,22 @@ namespace backtest
             
             // Custom move constructor (handle atomic member)
             OrderEngineInfo(OrderEngineInfo&& other) noexcept
-                : engine_(std::move(other.engine_)),
-                  ticker_(std::move(other.ticker_)),
-                  capacity_(other.capacity_),
-                  ipo_shares_(other.ipo_shares_),
-                  worker_id_(other.worker_id_),
-                  orders_since_quantum_(other.orders_since_quantum_),
+                : submit_(std::move(other.submit_)),
+                  worker_(std::move(other.worker_)),
+                  user_indices_(std::move(other.user_indices_)),
                   sim_metrics_index_(other.sim_metrics_index_.load(std::memory_order_relaxed))
             {
                 sim_metrics_[0] = other.sim_metrics_[0];
                 sim_metrics_[1] = other.sim_metrics_[1];
             }
-            
+
             // Custom move assignment (handle atomic member)
             OrderEngineInfo& operator=(OrderEngineInfo&& other) noexcept
             {
                 if (this != &other) {
-                    engine_ = std::move(other.engine_);
-                    ticker_ = std::move(other.ticker_);
-                    capacity_ = other.capacity_;
-                    ipo_shares_ = other.ipo_shares_;
-                    worker_id_ = other.worker_id_;
-                    orders_since_quantum_ = other.orders_since_quantum_;
+                    submit_ = std::move(other.submit_);
+                    worker_ = std::move(other.worker_);
+                    user_indices_ = std::move(other.user_indices_);
                     sim_metrics_[0] = other.sim_metrics_[0];
                     sim_metrics_[1] = other.sim_metrics_[1];
                     sim_metrics_index_.store(other.sim_metrics_index_.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -192,7 +226,7 @@ namespace backtest
         // Type aliases for maps 
         using EngineMap = std::vector<OrderEngineInfo>; // EngineId to EngineInfo
         using TickerMap = std::unordered_map<std::string, EngineId>; // Ticker to EngineId
-        using UserOrderMap = std::vector<std::vector<std::unordered_set<engine::OrderId>>>; // UserId to EngineId to Orders
+        using UserOrderMap = std::vector<EngineOrders>;  // engine-first: user_orders_[engine_id].by_user[user_id] = set
     }
 
 } // namespace backtest

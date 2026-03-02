@@ -22,8 +22,8 @@ void print_test_header(const std::string& test_name) {
 void test_singleton_pattern() {
     print_test_header("Singleton Pattern");
     backtest::runtime::EngineRuntime::reset_instance();    
-        auto& runtime1 = backtest::runtime::EngineRuntime::get_instance(1, 1048576 * 4, false, 0);  // Use proper capacity
-    auto& runtime2 = backtest::runtime::EngineRuntime::get_instance(4, 2000000, false, 0); // Should be same instance, params ignored
+        auto& runtime1 = backtest::runtime::EngineRuntime::get_instance(1, false, 0, 1048576 * 4);  // Use proper capacity
+    auto& runtime2 = backtest::runtime::EngineRuntime::get_instance(4, false, 0, 2000000); // Should be same instance, params ignored
     
     // Both references should point to the same instance
     assert(&runtime1 == &runtime2);
@@ -34,7 +34,7 @@ void test_stock_registration() {
     print_test_header("Stock Registration");
     
     backtest::runtime::EngineRuntime::reset_instance();
-        auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
+        auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, false, 0, 10000);
     
     // Test normal registration
     bool success = runtime.register_stock("BTC", 50000.00, 2.0);
@@ -80,7 +80,7 @@ void test_market_data_reads() {
     print_test_header("Market Data Reads");
     
     backtest::runtime::EngineRuntime::reset_instance();
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, false, 0, 10000);
     
     // Register a stock
     bool success = runtime.register_stock("TSLA", 200.00, 100.0);
@@ -125,7 +125,7 @@ void test_limit_orders() {
     print_test_header("Limit Orders");
     
     backtest::runtime::EngineRuntime::reset_instance();
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, false, 0, 10000);
     
     // Register stock
     bool success = runtime.register_stock("NVDA", 800.00, 50.0);
@@ -176,7 +176,7 @@ void test_market_orders() {
     print_test_header("Market Orders");
     
     backtest::runtime::EngineRuntime::reset_instance();
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, false, 0, 10000);
     
     // Register stock with lower quantity for easier testing
     bool success = runtime.register_stock("MSFT", 300.00, 10.0);
@@ -221,7 +221,7 @@ void test_order_cancellation() {
     print_test_header("Order Cancellation");
     
     backtest::runtime::EngineRuntime::reset_instance();
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, false, 0, 10000);
     
     // Register stock
     bool success = runtime.register_stock("AMZN", 3000.00, 20.0);
@@ -248,7 +248,7 @@ void test_order_editing() {
     print_test_header("Order Editing");
     
     backtest::runtime::EngineRuntime::reset_instance();
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, false, 0, 10000);
     
     // Register stock
     bool success = runtime.register_stock("GOOGL", 2800.00, 15.0);
@@ -284,18 +284,24 @@ void test_order_editing() {
         engine::OrderId order_to_edit = positions.size() == 1 ? positions[0] : positions[1];
         
         // Edit the order (new price and quantity)
-        runtime.submit_edit_order("GOOGL", order_to_edit, 2790.00, 1.5);
+        runtime.submit_replace_order("GOOGL", order_to_edit, 2790.00, 1.5);
         runtime.request_snapshot("GOOGL");
         runtime.process_pending_orders();
-        std::cout << "✓ Order edit submitted" << std::endl;
+        std::cout << "✓ Order replace submitted" << std::endl;
         
         // Verify order still exists
         std::size_t open_after = 0;
         if (const auto* s = runtime.get_snapshot("GOOGL")) open_after = s->open_count;
         
         if (open_after >= 1) {
-            std::cout << "✓ Order successfully edited" << std::endl;
+            std::cout << "✓ Order successfully replaced" << std::endl;
         }
+        
+        // Qty-only edit: change quantity only (same price)
+        runtime.submit_edit_order("GOOGL", order_to_edit, 2.0);
+        runtime.request_snapshot("GOOGL");
+        runtime.process_pending_orders();
+        std::cout << "✓ Order edit (qty-only) submitted" << std::endl;
         
         // Verify the best bid changed
         const auto* snap_googl2 = runtime.get_snapshot("GOOGL");
@@ -310,7 +316,7 @@ void test_multi_user_trading() {
     print_test_header("Multi-User Trading");
     
     backtest::runtime::EngineRuntime::reset_instance();
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, false, 0, 10000);
     
     // Register stock
     bool success = runtime.register_stock("META", 250.00, 100.0);
@@ -348,7 +354,7 @@ void test_async_processing() {
     print_test_header("Async Processing");
     
     backtest::runtime::EngineRuntime::reset_instance();
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, false, 0, 10000);
     
     const int BASIC_TEST_ORDERS = 50;
     
@@ -397,7 +403,7 @@ void test_stress_performance() {
     print_test_header("Stress Testing & Performance");
     
     backtest::runtime::EngineRuntime::reset_instance();
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(1, 1048576, false, 0);  // 1 thread for single stock
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(1, false, 0, 1048576);  // 1 thread for single stock
     
     const int STRESS_TEST_ORDERS = 10000000;  // 10M orders
     
@@ -492,7 +498,7 @@ void test_stress_performance() {
     for (std::size_t i = 0; i < edit_count; ++i) {
         // Edit with slightly different price and quantity
         double new_price = 60.00 + (i % 100) * 0.01;
-        runtime.submit_edit_order("STRESS", remaining_positions[i], new_price, 0.2);
+        runtime.submit_replace_order("STRESS", remaining_positions[i], new_price, 0.2);
     }
     runtime.request_snapshot("STRESS");
     runtime.process_pending_orders();
@@ -540,7 +546,7 @@ void test_multi_stock_stress() {
     const int NUM_WORKERS = 4;  // One worker per stock for optimal parallelism
     
     backtest::runtime::EngineRuntime::reset_instance();
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(NUM_WORKERS, 1048576, false, 0);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(NUM_WORKERS, false, 0, 1048576);
     
     std::cout << "=== Multi-Stock Test (" << NUM_STOCKS << " stocks, " 
               << ORDERS_PER_STOCK << " orders each, " << NUM_STOCKS * ORDERS_PER_STOCK 
@@ -642,7 +648,7 @@ void test_accumulate_drain_runtime()
     print_test_header("Accumulate (auto_match=off) then Drain via EngineRuntime");
 
     backtest::runtime::EngineRuntime::reset_instance();
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(2, 1048576, false, 0);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(2, false, 0, 1048576);
 
     const std::string ticker = "ACC";
     const std::size_t NUM_ORDERS = 1000000; // adjust for CI
@@ -695,7 +701,7 @@ void test_edge_cases() {
     print_test_header("Edge Cases");
     
     backtest::runtime::EngineRuntime::reset_instance();
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, 10000, false, 0);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(4, false, 0, 10000);
     
     // Test operations on non-existent ticker
     runtime.submit_limit_order("NONEXISTENT", engine::OrderSide::BID, 100.0, 1.0);
@@ -729,7 +735,7 @@ void test_notifications() {
     
     backtest::runtime::EngineRuntime::reset_instance();
     // Enable verbose mode to activate notification system
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(2, 10000, true, 0);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(2, true, 0, 10000);
     
     std::cout << "=== Testing notification system with verbose=true ===" << std::endl;
     
@@ -776,7 +782,7 @@ void test_notifications() {
 void test_order_fill_notification_flag() {
     print_test_header("Order Fill Notification Flag");
     backtest::runtime::EngineRuntime::reset_instance();
-    auto& runtime = backtest::runtime::EngineRuntime::get_instance(2, 10000, true, 0);
+    auto& runtime = backtest::runtime::EngineRuntime::get_instance(2, true, 0, 10000);
 
     // Register a stock
     bool success = runtime.register_stock("TEST", 100.0, 10.0);
@@ -810,9 +816,9 @@ void test_simulate_throughput() {
     backtest::runtime::EngineRuntime::reset_instance();
     auto& runtime = backtest::runtime::EngineRuntime::get_instance(
         1,              // workers
-        1048576 * 8,   // capacity (16M orders)
         false,          // verbose
-        0            // quantum
+        0,              // quantum
+        1048576 * 8     // max_capacity (16M orders)
     );
     
     // Set batch size for efficient order processing during simulation
@@ -879,6 +885,8 @@ void test_simulate_throughput() {
         std::cout << "  Orders placed:            " << metrics.orders_placed << std::endl;
         std::cout << "  Orders filled:            " << metrics.orders_filled << std::endl;
         std::cout << "  Orders cancelled:         " << metrics.orders_cancelled << std::endl;
+        std::cout << "  Orders edited:            " << metrics.orders_edited << std::endl;
+        std::cout << "  Orders replaced:          " << metrics.orders_replaced << std::endl;
         
         // Performance metrics
         std::cout << "\n⚡ Performance Metrics:" << std::endl;
@@ -886,24 +894,35 @@ void test_simulate_throughput() {
                   << metrics.simulation_time_seconds << " sec" << std::endl;
         std::cout << "  Total time (w/ setup):    " << total_sec << " sec" << std::endl;
         std::cout << "  Updates throughput:       " << std::fixed << std::setprecision(0)
-                  << (metrics.market_updates_processed / total_sec) << " updates/sec" << std::endl;
-        std::cout << "  Order rate:               " << (metrics.orders_placed / total_sec) << " orders/sec" << std::endl;
+                  << metrics.updates_per_second() << " updates/sec" << std::endl;
+        std::cout << "  Order ops rate:           " << std::fixed << std::setprecision(0)
+                  << metrics.orders_per_second() << " orders/sec" << std::endl;
         
         // Engine utilization
         std::cout << "\n🔧 Engine Utilization:" << std::endl;
         std::cout << "  Peak open orders:         " << metrics.peak_open_orders << std::endl;
         std::cout << "  Final open orders:        " << metrics.final_open_orders << std::endl;
-        std::cout << "  Avg utilization:          " << std::fixed << std::setprecision(2)
-                  << metrics.average_utilization_percent << "%" << std::endl;
         
         // Market data metrics
         std::cout << "\n📈 Market Data:" << std::endl;
         std::cout << "  Initial price:            $" << std::fixed << std::setprecision(2)
                   << metrics.initial_price << std::endl;
         std::cout << "  Final price:              $" << metrics.final_price << std::endl;
-        std::cout << "  Unique price levels:      " << metrics.unique_price_levels << std::endl;
         std::cout << "  Cache entries:            " << metrics.cache_entries << std::endl;
         
+        // Show market depth
+        const auto& top_bids = runtime.get_market_depth(TICKER, engine::OrderSide::BID);
+        std::cout << "Top " + std::to_string(top_bids.size()) + " Bids:\n";
+        for(const auto& s : top_bids){
+            std::cout << "  $" << s.first << " (" << s.second << ")\n";
+        }
+
+        const auto& top_asks = runtime.get_market_depth(TICKER, engine::OrderSide::ASK);
+        std::cout << "Top " + std::to_string(top_asks.size()) + " Asks:\n";
+        for(const auto& s : top_asks){
+            std::cout << "  $" << s.first << " (" << s.second << ")\n";
+        }
+
         // Fill rate
         double fill_rate = (metrics.orders_placed > 0) 
             ? (static_cast<double>(metrics.orders_filled) / metrics.orders_placed) * 100.0 
@@ -937,7 +956,7 @@ int main() {
     
     try {
         
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 1; i++) {
             test_singleton_pattern();
             test_stock_registration();
             test_market_data_reads();

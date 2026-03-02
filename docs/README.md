@@ -13,7 +13,7 @@
 
 ## API
 
-- [API Reference](api.md) – Python API (EngineRuntime, User, L2Stream, etc.)
+- [API Reference](api.md) – Python API (EngineRuntime, User, UserView, UserSnapshot, L2Stream, etc.)
 
 ## Examples and scripts
 

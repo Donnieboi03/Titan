@@ -17,22 +17,26 @@ Get the singleton runtime (create or reuse). Call `reset_instance()` first to re
 ```python
 EngineRuntime.get_instance(
     num_threads=4,
-    capacity=1048576,
     verbose=False,
-    quantum=1000
+    quantum=1000,
+    max_capacity=1048576,
+    max_engine_count=100,
+    max_strategies=1000
 ) -> EngineRuntime
 ```
 
 **Parameters:**
 - `num_threads` (int): Number of worker threads. Default: 4
-- `capacity` (int): Maximum orders per engine. Default: 1M (1048576)
 - `verbose` (bool): Enable notification/logging (e.g. order accept/fill/cancel). Default: False
 - `quantum` (int): Scheduling quantum in orders. Default: 1000
+- `max_capacity` (int): Max order pool size per engine. Default: 1M (1048576)
+- `max_engine_count` (int): Reserve space for this many stocks/engines (avoids realloc). Default: 100
+- `max_strategies` (int): Reserve space for this many strategies; keeps `UserView*` from `register_strategy()` valid. Default: 1000
 
 **Example:**
 ```python
 titan.EngineRuntime.reset_instance()
-runtime = titan.EngineRuntime.get_instance(num_threads=8, capacity=2*1024*1024, verbose=True)
+runtime = titan.EngineRuntime.get_instance(num_threads=8, max_capacity=2*1024*1024, verbose=True)
 ```
 
 ---
@@ -161,12 +165,12 @@ runtime.submit_cancel_order("AAPL", order_id=12345, user_id=100)
 
 ---
 
-#### submit_edit_order()
+#### submit_replace_order()
 
-Modify an existing order.
+Replace an existing order (new price and/or quantity). Full replace: order is removed from the book and re-inserted at the new price/quantity; loses time priority.
 
 ```python
-submit_edit_order(
+submit_replace_order(
     ticker: str,
     order_id: int,
     new_price: float,
@@ -175,22 +179,37 @@ submit_edit_order(
 ) -> bool
 ```
 
-**Parameters:**
-- `ticker` (str): Stock symbol
-- `order_id` (int): Order ID to modify
-- `new_price` (float): New limit price
-- `new_qty` (float): New quantity
-- `user_id` (int, optional): User identifier (for validation)
+**Parameters:** `ticker`, `order_id`, `new_price`, `new_qty`, `user_id` (optional).
 
-**Returns:** `True` if the edit was accepted, `False` on failure (e.g. order not found).
-
-**Notes:**
-- Only owner can edit order
-- Loses time priority at new price level
+**Returns:** `True` if accepted, `False` on failure.
 
 **Example:**
 ```python
-runtime.submit_edit_order("AAPL", order_id=12345, new_price=149.75, user_id=100)
+runtime.submit_replace_order("AAPL", order_id=12345, new_price=149.75, new_qty=50.0, user_id=100)
+```
+
+---
+
+#### submit_edit_order()
+
+Edit an existing order's quantity only (same price). O(1) in-engine update; keeps time priority.
+
+```python
+submit_edit_order(
+    ticker: str,
+    order_id: int,
+    new_qty: float,
+    user_id: int = INVALID_USER_ID
+) -> bool
+```
+
+**Parameters:** `ticker`, `order_id`, `new_qty`, `user_id` (optional). No `new_price` — use `submit_replace_order` to change price.
+
+**Returns:** `True` if accepted, `False` on failure.
+
+**Example:**
+```python
+runtime.submit_edit_order("AAPL", order_id=12345, new_qty=75.0, user_id=100)
 ```
 
 ---
@@ -256,6 +275,61 @@ process_pending_orders_async(ticker: str) -> None
 
 **Parameters:**
 - `ticker` (str, optional): If provided, process only orders for this ticker.
+
+---
+
+#### simulate()
+
+Run a C++-driven simulation: parse an L2 data file and apply updates to the order book for a ticker. The simulation job runs on a worker thread; poll for completion with `is_simulation_running(ticker)` and read results with `get_simulation_metrics(ticker)`.
+
+Orders are matched as the L2 stream is applied.
+
+```python
+simulate(
+    filepath: str,
+    ticker: str,
+    target_orders: int = 0,
+    price_sample_size: int = 10,
+    shares_outstanding: float = 1000000.0,
+    record_path: str = ""
+) -> bool
+```
+
+**Parameters:**
+- `filepath`: Path to `.bin`, `.csv`, or `.csv.gz` L2 data file.
+- `ticker`: Symbol to register and simulate (stock is registered internally if needed; initial price sampled from data).
+- `target_orders`: Stop after this many market updates (0 = process entire file).
+- `price_sample_size`: Number of data points to sample for IPO price. Default: 10.
+- `shares_outstanding`: Total shares for IPO registration. Default: 1000000.0.
+- `record_path`: If non-empty, enable L2 recording to this path during simulation.
+
+**Returns:** `True` if the simulation job was started successfully, `False` on error (e.g. file not found, ticker invalid).
+
+**Example:**
+```python
+runtime.simulate("data/btcusdt_l2.csv", "BTCUSDT", target_orders=0)
+while runtime.is_simulation_running("BTCUSDT"):
+    time.sleep(0.05)
+metrics = runtime.get_simulation_metrics("BTCUSDT")
+print(metrics.orders_placed, metrics.simulation_time_seconds)
+```
+
+---
+
+#### set_auto_match() / get_auto_match()
+
+**Advanced.** Enable or disable automatic order matching for a ticker. When disabled, orders are queued and are matched only when you call `set_auto_match(ticker, True)` (in arrival order). `simulate()` always runs with matching enabled.
+
+```python
+set_auto_match(ticker: str, auto_match: bool) -> bool
+get_auto_match(ticker: str) -> bool
+```
+
+**Parameters:**
+- `ticker`: Stock symbol (must be registered).
+- `auto_match`: `True` to match orders immediately on place/replace; `False` to queue and match only when toggled back to `True` (drain).
+
+**Returns:** `set_auto_match` returns `True` if the ticker exists; `get_auto_match` returns the current setting for the ticker.
 
 ---
 
@@ -338,15 +412,15 @@ register_strategy(
     ticker: str,
     strategy: Callable[[User], None],
     starting_capital: float = 100000.0
-) -> Optional[User]
+) -> Optional[UserView]
 ```
 
 **Parameters:**
 - `ticker` (str): Stock symbol this strategy is bound to (must already be registered via `register_stock()`).
-- `strategy` (callable): Function receiving a `User` handle; called on each quantum for this ticker.
+- `strategy` (callable): Function receiving a **`User`** handle. The strategy is bound to this ticker; inside the callback, **`User`** methods (submit_limit_order, get_best_bid, get_positions, etc.) do **not** take a ticker argument—they operate on the registered ticker only. Called on each quantum for this ticker.
 - `starting_capital` (float): Initial cash balance. Default: 100000.0
 
-**Returns:** `User` handle for positions/PnL, or `None` if ticker not found.
+**Returns:** **`UserView`** handle for observing positions/PnL (e.g. `get_snapshot()`, `get_capital()`, `get_user_id()`), or `None` if ticker not found. The returned handle does **not** expose order submission; to place orders from the main thread use `runtime.submit_limit_order(ticker, side, price, qty, user_id=view.get_user_id())`. For order IDs use `runtime.get_positions(view.get_user_id(), ticker)` and `runtime.get_active_orders(view.get_user_id(), ticker)`.
 
 ---
 
@@ -721,9 +795,19 @@ class OrderSide(Enum):
 
 ---
 
+### UserView and UserSnapshot
+
+**`UserView`** is the type returned by `register_strategy()`. It exposes only observational methods: `get_snapshot()`, `get_capital()`, `get_realized_pnl()`, `get_total_volume()`, `get_user_id()`, `get_ticker()`, `get_position()`, `get_all_positions()`, `get_committed_sell_qty()`, `get_unrealized_pnl()`. (Each strategy is tied to one ticker, so position/committed/unrealized PnL are scalars.) It does **not** expose `submit_limit_order` or other order submission; use `runtime.submit_*(..., user_id=view.get_user_id())` for that. For order IDs (positions/active orders) use `runtime.get_positions(view.get_user_id(), ticker)` and `runtime.get_active_orders(view.get_user_id(), ticker)`.
+
+**`UserSnapshot`** is the struct returned by `UserView.get_snapshot()`. It contains a copy of user state updated each quantum: `user_id`, `capital`, `realized_pnl`, `total_volume`, `ticker`, `position`, `avg_price`, `committed_sell_qty`, `unrealized_pnl` (single-ticker per strategy). Safe to hold and inspect from the main thread.
+
+**`User`** is the type passed **into** the strategy callback. It extends `UserView` and adds full order submission and market data. All methods operate on the strategy's registered ticker; **no ticker parameter** is passed (e.g. `user.submit_limit_order(side, price, qty)`, `user.get_best_bid()`, `user.get_positions()`, `user.get_order_info(order_id)`). Use it only inside the strategy callable.
+
+---
+
 ### OrderInfo
 
-Returned by `get_order(ticker, order_id)` and `User.get_order_info(ticker, order_id)`. **Lifetime:** The API returns a **copy** of the order snapshot, not a pointer or reference. You may store and use the returned `OrderInfo` after calling `process_pending_orders()` or other engine steps; it will not be invalidated.
+Returned by `get_order(ticker, order_id)` and `User.get_order_info(order_id)` (User is bound to one ticker). **Lifetime:** The API returns a **copy** of the order snapshot, not a pointer or reference. You may store and use the returned `OrderInfo` after calling `process_pending_orders()` or other engine steps; it will not be invalidated.
 
 **Attributes:** `side`, `type`, `status`, `time`, plus `get_price_dollars()`, `get_qty()`. Has a readable `__repr__` (e.g. `<OrderInfo BID LIMIT $149.50 x 100.0 [OPEN]>`).
 

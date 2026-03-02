@@ -14,20 +14,17 @@ void test_diagnostics() {
     
     // Setup runtime with specific capacity
     EngineRuntime::reset_instance();
-    auto& runtime = EngineRuntime::get_instance(1, 1048576, false, 1000);
+    auto& runtime = EngineRuntime::get_instance(1, false, 1000, 1048576);
     
     // Register stock
     std::string ticker = "AAPL";
     runtime.register_stock(std::string(ticker), 150.0, 1000.0);
     
-    // Register strategy with capital for this ticker
-    User* trader = runtime.register_strategy(std::string(ticker), [](User* user) {
-        auto tickers = user->list_tickers();
-        for (const auto& t : tickers) {
-            double bid = user->get_best_bid(t);
-            if (bid > 0) {
-                user->submit_limit_order(t, OrderSide::BID, bid - 1.0, 10.0);
-            }
+    // Register strategy with capital for this ticker (returns UserView*)
+    UserView* trader = runtime.register_strategy(std::string(ticker), [](User* user) {
+        double bid = user->get_best_bid();
+        if (bid > 0) {
+            user->submit_limit_order(OrderSide::BID, bid - 1.0, 10.0);
         }
     }, 100000.0);
     
@@ -41,10 +38,11 @@ void test_diagnostics() {
     std::cout << "  Placed: " << (snap ? snap->placed_count : 0) << "\n";
     std::cout << "  Open: " << (snap ? snap->open_count : 0) << "\n\n";
     
-    // Submit orders
+    // Submit orders via User (tracked; same ticker as strategy)
     std::cout << "Submitting 10 limit orders...\n";
+    auto* u = static_cast<user::User*>(trader);
     for (int i = 0; i < 10; i++) {
-        trader->submit_limit_order(ticker, OrderSide::BID, 148.0 + i * 0.1, 5.0);
+        u->submit_limit_order(OrderSide::BID, 148.0 + i * 0.1, 5.0);
     }
     
     std::cout << "After submission (before processing):\n";
@@ -61,12 +59,12 @@ void test_diagnostics() {
     std::cout << "  Placed: " << (snap ? snap->placed_count : 0) << "\n";
     std::cout << "  Open: " << (snap ? snap->open_count : 0) << "\n\n";
     
-    // Get order IDs and test presence via get_active_orders
-    auto order_ids = trader->get_active_orders(ticker);
+    // Get order IDs and test presence via get_active_orders (via runtime)
+    auto order_ids = runtime.get_active_orders(trader->get_user_id(), ticker);
     if (!order_ids.empty()) {
         OrderId first_order = order_ids[0];
         std::cout << "Testing order presence (get_active_orders):\n";
-        auto active = trader->get_active_orders(ticker);
+        auto active = runtime.get_active_orders(trader->get_user_id(), ticker);
         bool first_in_list = std::find(active.begin(), active.end(), first_order) != active.end();
         std::cout << "  Order #" << first_order << " in active list: "
                   << (first_in_list ? "YES" : "NO") << "\n";
@@ -74,14 +72,14 @@ void test_diagnostics() {
         std::cout << "  Order #999999 in active list: "
                   << (fake_in_list ? "YES" : "NO") << "\n\n";
         
-        // Cancel an order
+        // Cancel an order via User
         std::cout << "Cancelling order #" << first_order << "...\n";
-        trader->submit_cancel_order(ticker, first_order);
+        static_cast<user::User*>(trader)->submit_cancel_order(first_order);
         runtime.request_snapshot(ticker);
         runtime.process_pending_orders();
         
         snap = runtime.get_snapshot(ticker);
-        active = trader->get_active_orders(ticker);
+        active = runtime.get_active_orders(trader->get_user_id(), ticker);
         bool still_in_list = std::find(active.begin(), active.end(), first_order) != active.end();
         std::cout << "After cancellation:\n";
         std::cout << "  Order #" << first_order << " in active list: "

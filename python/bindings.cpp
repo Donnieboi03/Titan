@@ -101,75 +101,110 @@ PYBIND11_MODULE(titan_core, m) {
                    " [" + status + "]>";
         });
 
-    // --- User class ---
-    py::class_<user::User>(m, "User")
-        // Order submissions
+    // --- UserSnapshot (read-only copy for Python; double-buffered in C++; single-ticker per strategy) ---
+    py::class_<user::UserSnapshot>(m, "UserSnapshot")
+        .def_readonly("user_id", &user::UserSnapshot::user_id)
+        .def_readonly("capital", &user::UserSnapshot::capital)
+        .def_readonly("realized_pnl", &user::UserSnapshot::realized_pnl)
+        .def_readonly("total_volume", &user::UserSnapshot::total_volume)
+        .def_readonly("ticker", &user::UserSnapshot::ticker)
+        .def_readonly("position", &user::UserSnapshot::position)
+        .def_readonly("avg_price", &user::UserSnapshot::avg_price)
+        .def_readonly("unrealized_pnl", &user::UserSnapshot::unrealized_pnl);
+
+    // --- UserView (observational handle returned by register_strategy; no submit_*) ---
+    py::class_<user::UserView>(m, "UserView")
+        .def("get_snapshot",
+             [](const user::UserView& self) { return self.get_snapshot(); },
+             py::return_value_policy::copy,
+             "Return a copy of the latest user state snapshot (capital, positions, etc.).")
+        .def("get_capital", &user::UserView::get_capital)
+        .def("get_realized_pnl", &user::UserView::get_realized_pnl)
+        .def("get_total_volume", &user::UserView::get_total_volume)
+        .def("get_user_id", &user::UserView::get_user_id)
+        .def("get_ticker", &user::UserView::get_ticker)
+        .def("get_position", &user::UserView::get_position)
+        .def("get_all_positions", &user::UserView::get_all_positions)
+        .def("get_committed_sell_qty", &user::UserView::get_committed_sell_qty)
+        .def("get_unrealized_pnl", &user::UserView::get_unrealized_pnl);
+
+    // --- User (full handle passed to strategy callback; extends UserView, no ticker param — uses registered ticker) ---
+    py::class_<user::User, user::UserView>(m, "User")
         .def("submit_limit_order",
-             [](user::User& self, const std::string& ticker, const py::object& side,
-                double price, double quantity) {
-                 return self.submit_limit_order(ticker, side_from_py(side), price, quantity);
+             [](user::User& self, const py::object& side, double price, double quantity) {
+                 return self.submit_limit_order(side_from_py(side), price, quantity);
              },
-             py::arg("ticker"), py::arg("side"), py::arg("price"), py::arg("quantity"),
+             py::arg("side"), py::arg("price"), py::arg("quantity"),
              py::call_guard<py::gil_scoped_release>())
         .def("submit_market_order",
-             [](user::User& self, const std::string& ticker, const py::object& side, double quantity) {
-                 return self.submit_market_order(ticker, side_from_py(side), quantity);
+             [](user::User& self, const py::object& side, double quantity) {
+                 return self.submit_market_order(side_from_py(side), quantity);
              },
-             py::arg("ticker"), py::arg("side"), py::arg("quantity"),
+             py::arg("side"), py::arg("quantity"),
              py::call_guard<py::gil_scoped_release>())
         .def("submit_cancel_order", &user::User::submit_cancel_order,
-             py::arg("ticker"), py::arg("order_id"),
+             py::arg("order_id"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("submit_replace_order", &user::User::submit_replace_order,
+             py::arg("order_id"), py::arg("new_price"), py::arg("new_quantity"),
              py::call_guard<py::gil_scoped_release>())
         .def("submit_edit_order", &user::User::submit_edit_order,
-             py::arg("ticker"), py::arg("order_id"), py::arg("new_price"), py::arg("new_quantity"),
+             py::arg("order_id"), py::arg("new_quantity"),
              py::call_guard<py::gil_scoped_release>())
-        
-        // Market data queries
-        .def("get_best_bid", &user::User::get_best_bid, py::arg("ticker"))
-        .def("get_best_ask", &user::User::get_best_ask, py::arg("ticker"))
-        .def("get_market_price", &user::User::get_market_price, py::arg("ticker"))
+        .def("get_best_bid", &user::User::get_best_bid)
+        .def("get_best_ask", &user::User::get_best_ask)
+        .def("get_market_price", &user::User::get_market_price)
         .def("get_market_depth",
-             [](user::User& self, const std::string& ticker, const py::object& side, std::size_t depth) {
-                 return self.get_market_depth(ticker, side_from_py(side), depth);
+             [](user::User& self, const py::object& side, std::size_t depth) {
+                 return self.get_market_depth(side_from_py(side), depth);
              },
-             py::arg("ticker"), py::arg("side"), py::arg("depth") = 20)
+             py::arg("side"), py::arg("depth") = 20)
         .def("list_tickers", &user::User::list_tickers)
-        
-        // Position management
-        .def("get_positions", &user::User::get_positions, py::arg("ticker"))
-        .def("get_active_orders", &user::User::get_active_orders, py::arg("ticker"))
-        .def("get_position", &user::User::get_position, py::arg("ticker"))
+        .def("get_positions", &user::User::get_positions)
+        .def("get_active_orders", &user::User::get_active_orders)
+        .def("get_position", &user::User::get_position)
         .def("get_all_positions", &user::User::get_all_positions)
         .def("get_order_info",
-             [](const user::User& self, const std::string& ticker, engine::OrderId order_id) -> py::object {
-                 const engine::OrderInfo* info = self.get_order_info(ticker, order_id);
+             [](const user::User& self, engine::OrderId order_id) -> py::object {
+                 const engine::OrderInfo* info = self.get_order_info(order_id);
                  if (!info) return py::none();
                  engine::OrderInfo copy(*info);
                  return py::cast(copy);
              },
-             py::arg("ticker"), py::arg("order_id"))
-        .def("has_sufficient_shares", &user::User::has_sufficient_shares,
-             py::arg("ticker"), py::arg("qty"))
+             py::arg("order_id"))
+        .def("has_sufficient_shares",
+             [](const user::User& self, double qty) {
+                 return self.has_sufficient_shares(backtest::math::qty_to_internal(qty));
+             },
+             py::arg("qty"))
         
         // Account info
         .def("get_user_id", &user::User::get_user_id)
         .def("get_capital", &user::User::get_capital)
         .def("get_realized_pnl", &user::User::get_realized_pnl)
-        .def("get_unrealized_pnl", &user::User::get_unrealized_pnl,
-             py::arg("ticker"), py::arg("current_price"))
+        .def("get_unrealized_pnl", &user::User::get_unrealized_pnl)
         .def("get_total_volume", &user::User::get_total_volume);
+
+    // get_order: return a copy (or None) so Python can hold it safely; C++ returns pointer
+    auto get_order_fn = [](runtime::EngineRuntime& self, const std::string& ticker, engine::OrderId order_id) -> py::object {
+        const engine::OrderInfo* p = self.get_order(ticker, order_id);
+        if (!p) return py::none();
+        return py::cast(engine::OrderInfo(*p));
+    };
 
     // --- EngineRuntime (singleton with private destructor - use nodelete) ---
     py::class_<runtime::EngineRuntime, std::unique_ptr<runtime::EngineRuntime, py::nodelete>>(m, "EngineRuntime")
         .def_static("get_instance",
-             [](std::size_t num_threads, std::size_t capacity, bool verbose, std::size_t quantum) 
+             [](std::size_t num_threads, bool verbose, std::size_t quantum, std::size_t max_capacity, std::size_t max_engine_count, std::size_t max_strategies)
              -> runtime::EngineRuntime& {
-                 return runtime::EngineRuntime::get_instance(num_threads, capacity, verbose, quantum);
+                 return runtime::EngineRuntime::get_instance(num_threads, verbose, quantum, max_capacity, max_engine_count, max_strategies);
              },
-             py::arg("num_threads") = 1, 
-             py::arg("capacity") = 1048576, 
+             py::arg("num_threads") = 1,
              py::arg("verbose") = false,
              py::arg("quantum") = 1000,
+             py::arg("max_capacity") = 1048576,
+             py::arg("max_engine_count") = 100,
+             py::arg("max_strategies") = 1000,
              py::return_value_policy::reference)
         .def_static("reset_instance", &runtime::EngineRuntime::reset_instance)
         
@@ -188,30 +223,29 @@ PYBIND11_MODULE(titan_core, m) {
              py::arg("ticker"),
              py::call_guard<py::gil_scoped_release>())
         
-        // Order submission (direct, for testing)
+        // Order submission (untracked only). For tracked orders use the User view's submit_*.
         .def("submit_limit_order",
              [](runtime::EngineRuntime& self, const std::string& ticker, const py::object& side,
-                double price, double qty, user::UserId user_id) {
-                 return self.submit_limit_order(ticker, side_from_py(side), price, qty, user_id);
+                double price, double qty) {
+                 return self.submit_limit_order(ticker, side_from_py(side), price, qty);
              },
              py::arg("ticker"), py::arg("side"), py::arg("price"), py::arg("qty"),
-             py::arg("user_id") = user::INVALID_USER_ID,
              py::call_guard<py::gil_scoped_release>())
         .def("submit_market_order",
              [](runtime::EngineRuntime& self, const std::string& ticker, const py::object& side,
-                double qty, user::UserId user_id) {
-                 return self.submit_market_order(ticker, side_from_py(side), qty, user_id);
+                double qty) {
+                 return self.submit_market_order(ticker, side_from_py(side), qty);
              },
              py::arg("ticker"), py::arg("side"), py::arg("qty"),
-             py::arg("user_id") = user::INVALID_USER_ID,
              py::call_guard<py::gil_scoped_release>())
         .def("submit_cancel_order", &runtime::EngineRuntime::submit_cancel_order,
              py::arg("ticker"), py::arg("order_id"),
-             py::arg("user_id") = user::INVALID_USER_ID,
+             py::call_guard<py::gil_scoped_release>())
+        .def("submit_replace_order", &runtime::EngineRuntime::submit_replace_order,
+             py::arg("ticker"), py::arg("order_id"), py::arg("new_price"), py::arg("new_qty"),
              py::call_guard<py::gil_scoped_release>())
         .def("submit_edit_order", &runtime::EngineRuntime::submit_edit_order,
-             py::arg("ticker"), py::arg("order_id"), py::arg("new_price"), py::arg("new_qty"),
-             py::arg("user_id") = user::INVALID_USER_ID,
+             py::arg("ticker"), py::arg("order_id"), py::arg("new_qty"),
              py::call_guard<py::gil_scoped_release>())
         
         // Market data queries
@@ -253,14 +287,16 @@ PYBIND11_MODULE(titan_core, m) {
              py::arg("price_sample_size") = 10,
              py::arg("shares_outstanding") = 1000000.0,
              py::arg("record_path") = "",
-             py::call_guard<py::gil_scoped_release>())
+             py::call_guard<py::gil_scoped_release>(),
+             py::doc("Start async simulation. Returns True if started. Poll is_simulation_running(ticker) and get_simulation_metrics(ticker)."))
         .def("is_simulation_running", &runtime::EngineRuntime::is_simulation_running, py::arg("ticker"))
         .def("get_simulation_metrics", &runtime::EngineRuntime::get_simulation_metrics, py::arg("ticker"))
         .def("all_jobs_completed", &runtime::EngineRuntime::all_jobs_completed)
         
         // Control
         .def("set_auto_match", &runtime::EngineRuntime::set_auto_match,
-             py::arg("ticker"), py::arg("auto_match"))
+             py::arg("ticker"), py::arg("auto_match"),
+             py::doc("Enable or disable automatic matching for ticker (advanced)."))
         .def("get_auto_match", &runtime::EngineRuntime::get_auto_match, py::arg("ticker"))
         .def("set_batch_size", &runtime::EngineRuntime::set_batch_size, py::arg("batch_size"))
         .def("get_batch_size", &runtime::EngineRuntime::get_batch_size)
@@ -284,36 +320,29 @@ PYBIND11_MODULE(titan_core, m) {
         .def("get_cancelled_count", &runtime::EngineRuntime::get_cancelled_count, py::arg("ticker"))
         .def("get_filled_count", &runtime::EngineRuntime::get_filled_count, py::arg("ticker"))
         .def("get_open_count", &runtime::EngineRuntime::get_open_count, py::arg("ticker"))
-        
-        // Market data queries (additional) — return a copy so Python can hold it safely
-        .def("get_order",
-             [](runtime::EngineRuntime& self, const std::string& ticker, engine::OrderId order_id)
-             -> py::object {
-                 const engine::OrderInfo* info = self.get_order(ticker, order_id);
-                 if (!info) return py::none();
-                 engine::OrderInfo copy(*info);
-                 return py::cast(copy);
-             },
-             py::arg("ticker"), py::arg("order_id"))
-
+        .def("get_order", get_order_fn, py::arg("ticker"), py::arg("order_id"))
         // Diagnostics
         .def("get_capacity", &runtime::EngineRuntime::get_capacity, py::arg("ticker"))
-        .def("get_utilization", &runtime::EngineRuntime::get_utilization, py::arg("ticker"))
         .def("get_pending_count", &runtime::EngineRuntime::get_pending_count, py::arg("ticker"))
-        .def("order_exists", &runtime::EngineRuntime::order_exists,
-             py::arg("ticker"), py::arg("order_id"))
-        .def("get_positions", &runtime::EngineRuntime::get_positions, py::arg("user_id"), py::arg("ticker"))
-        .def("get_active_orders", &runtime::EngineRuntime::get_active_orders, py::arg("user_id"), py::arg("ticker"))
+        .def("get_positions",
+             [](const runtime::EngineRuntime& self, user::UserId user_id, const std::string& ticker) {
+                 return self.get_positions(user_id, ticker);
+             },
+             py::arg("user_id"), py::arg("ticker"))
+        .def("get_active_orders",
+             [](const runtime::EngineRuntime& self, user::UserId user_id, const std::string& ticker) {
+                 return self.get_active_orders(user_id, ticker);
+             },
+             py::arg("user_id"), py::arg("ticker"))
         
         // Strategy management
         .def("unregister_strategy", &runtime::EngineRuntime::unregister_strategy,
              py::arg("user_id"))
 
         // Strategy registration (ticker required for deterministic per-engine quantum; C++ takes std::string&&)
+        // Returns UserView* so Python has observational API; for tracked orders use the view's submit_* methods.
         .def("register_strategy",
-             [](runtime::EngineRuntime& self, std::string ticker, py::function py_strategy, double starting_capital) 
-             -> user::User* {
-                 // Wrap Python function in C++ lambda with GIL acquisition
+             ([](runtime::EngineRuntime& self, std::string ticker, py::function py_strategy, double starting_capital) -> user::UserView* {
                  user::Strategy cpp_strategy = [py_strategy](user::User* user) {
                      py::gil_scoped_acquire gil;
                      try {
@@ -323,7 +352,7 @@ PYBIND11_MODULE(titan_core, m) {
                      }
                  };
                  return self.register_strategy(std::move(ticker), std::move(cpp_strategy), starting_capital);
-             },
+             }),
              py::arg("ticker"), py::arg("strategy"), py::arg("starting_capital") = 100000.0,
              py::return_value_policy::reference);
 
@@ -334,14 +363,12 @@ PYBIND11_MODULE(titan_core, m) {
         .def_readonly("orders_filled", &runtime::SimulationMetrics::orders_filled)
         .def_readonly("orders_cancelled", &runtime::SimulationMetrics::orders_cancelled)
         .def_readonly("simulation_time_seconds", &runtime::SimulationMetrics::simulation_time_seconds)
-        .def_readonly("orders_per_second", &runtime::SimulationMetrics::orders_per_second)
-        .def_readonly("updates_per_second", &runtime::SimulationMetrics::updates_per_second)
+        .def_property_readonly("orders_per_second", [](const runtime::SimulationMetrics& m) { return m.orders_per_second(); })
+        .def_property_readonly("updates_per_second", [](const runtime::SimulationMetrics& m) { return m.updates_per_second(); })
         .def_readonly("peak_open_orders", &runtime::SimulationMetrics::peak_open_orders)
         .def_readonly("final_open_orders", &runtime::SimulationMetrics::final_open_orders)
-        .def_readonly("average_utilization_percent", &runtime::SimulationMetrics::average_utilization_percent)
         .def_readonly("initial_price", &runtime::SimulationMetrics::initial_price)
         .def_readonly("final_price", &runtime::SimulationMetrics::final_price)
-        .def_readonly("unique_price_levels", &runtime::SimulationMetrics::unique_price_levels)
         .def_readonly("cache_entries", &runtime::SimulationMetrics::cache_entries)
         .def_readonly("simulation_running", &runtime::SimulationMetrics::simulation_running);
 

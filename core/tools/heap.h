@@ -74,7 +74,8 @@ T Heap<T, TYPE>::peek(int idx) const noexcept
 template <typename T, HeapType TYPE>
 int Heap<T, TYPE>::find(T data) const noexcept
 {
-    for (int i = 0; i < heap_.size(); i++)
+    const int sz = static_cast<int>(heap_.size());
+    for (int i = 0; i < sz; i++)
     {
         if (heap_[i] == data) return i;
     }  
@@ -115,13 +116,14 @@ void Heap<T, TYPE>::heapify_up(int idx)
 template <typename T, HeapType TYPE>
 void Heap<T, TYPE>::heapify_down(int idx)
 {
-    while (idx < heap_.size())
+    const int sz = static_cast<int>(heap_.size());
+    while (idx < sz)
     {
-        int left_child = (idx * 2) + 1 < heap_.size() ? (idx * 2) + 1 : idx;
-        int right_child = (idx * 2) + 2 < heap_.size() ? (idx * 2) + 2 : idx;
+        int left_child = (idx * 2) + 1 < sz ? (idx * 2) + 1 : idx;
+        int right_child = (idx * 2) + 2 < sz ? (idx * 2) + 2 : idx;
         int best_child = idx;
 
-        if (left_child < heap_.size()) 
+        if (left_child < sz) 
         {
             if constexpr (TYPE == HeapType::MIN)
             {
@@ -135,7 +137,7 @@ void Heap<T, TYPE>::heapify_down(int idx)
             }
         }
 
-        if (right_child < heap_.size()) 
+        if (right_child < sz) 
         {
             if constexpr (TYPE == HeapType::MIN)
             {

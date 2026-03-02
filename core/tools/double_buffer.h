@@ -72,9 +72,9 @@ DoubleBuffer<T>::DoubleBuffer(std::size_t capacity) noexcept
 
 template<typename T>
 DoubleBuffer<T>::DoubleBuffer(DoubleBuffer&& other) noexcept
-    : buffer_a_(std::move(other.buffer_a_))
+    : capacity_(other.capacity_)
+    , buffer_a_(std::move(other.buffer_a_))
     , buffer_b_(std::move(other.buffer_b_))
-    , capacity_(other.capacity_)
 {
     // Copy atomic state values from other into our aligned producer/consumer state
     producer_.swap_requested.store(other.producer_.swap_requested.load(std::memory_order_relaxed), std::memory_order_relaxed);

@@ -15,9 +15,9 @@ namespace stream {
 // Read mode constructor
 L2Stream::L2Stream(const std::string& filepath, bool streaming)
     : mode_(StreamMode::Read), format_(Format::UNKNOWN), fd_(-1), mapped_data_(nullptr), file_size_(0),
-      current_record_(0), total_records_(0), buffer_index_(0), buffer_valid_(0),
-      gz_file_(nullptr), header_parsed_(false),
+      total_records_(0), current_record_(0), buffer_index_(0), buffer_valid_(0),
       use_streaming_(streaming), stream_buffer_pos_(0), stream_buffer_valid_(0), file_position_(0),
+      gz_file_(nullptr), header_parsed_(false),
       write_file_(nullptr), write_gz_file_(nullptr), write_binary_(false), csv_header_written_(false)
 {
     std::memset(prefetch_buffer_, 0, sizeof(prefetch_buffer_));
@@ -41,9 +41,9 @@ L2Stream::L2Stream(const std::string& filepath, bool streaming)
 // Write mode constructor
 L2Stream::L2Stream(const std::string& filepath, StreamMode mode)
     : mode_(StreamMode::Write), format_(Format::UNKNOWN), fd_(-1), mapped_data_(nullptr), file_size_(0),
-      current_record_(0), total_records_(0), buffer_index_(0), buffer_valid_(0),
-      gz_file_(nullptr), header_parsed_(false),
+      total_records_(0), current_record_(0), buffer_index_(0), buffer_valid_(0),
       use_streaming_(false), stream_buffer_pos_(0), stream_buffer_valid_(0), file_position_(0),
+      gz_file_(nullptr), header_parsed_(false),
       write_file_(nullptr), write_gz_file_(nullptr), write_binary_(false), csv_header_written_(false)
 {
     std::memset(prefetch_buffer_, 0, sizeof(prefetch_buffer_));

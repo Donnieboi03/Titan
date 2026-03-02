@@ -13,7 +13,7 @@
 
 namespace backtest
 {
-    namespace user { class User; }
+    namespace user { class User; class UserView; }
     namespace runtime
     {
         class EngineRuntime;
@@ -23,10 +23,11 @@ namespace backtest
             engine::OrderId submit_limit_order(const std::string& ticker, engine::OrderSide side, double price, double qty, user::UserId user_id);
             engine::OrderId submit_market_order(const std::string& ticker, engine::OrderSide side, double qty, user::UserId user_id);
             bool submit_cancel_order(const std::string& ticker, engine::OrderId order_id, user::UserId user_id);
-            bool submit_edit_order(const std::string& ticker, engine::OrderId order_id, double new_price, double new_qty, user::UserId user_id);
-            void apply_fill_to_user(user::User* u, const std::string& ticker, engine::OrderId order_id, engine::OrderSide side, double qty, double price);
-            void reserve_on_accept_to_user(user::User* u, const std::string& ticker, engine::OrderId order_id, engine::OrderSide side, double qty, double price);
-            void release_reservation_for_user(user::User* u, engine::OrderId order_id);
+            bool submit_replace_order(const std::string& ticker, engine::OrderId order_id, double new_price, double new_qty, user::UserId user_id);
+            bool submit_edit_order(const std::string& ticker, engine::OrderId order_id, double new_qty, user::UserId user_id);
+            void apply_fill_to_user(user::User* u, engine::OrderId order_id, engine::OrderSide side, double qty, double price);
+            void reserve_on_accept_to_user(user::User* u, engine::OrderId order_id, engine::OrderSide side, double qty, double price);
+            void release_reservation_for_user(user::User* u, engine::OrderId order_id, engine::OrderSide side, double remaining_qty, double price);
             void setup_user_reservations(user::User* u, std::size_t reserve_size);
 
             std::vector<engine::OrderId> get_positions(user::UserId user_id, const std::string& ticker) const;
@@ -41,63 +42,98 @@ namespace backtest
 
     namespace user
     {
-        class User
+        // Observational-only interface returned to client after registration. No submit* methods.
+        class UserView
         {
-            friend class backtest::runtime::UserAPI;
+        public:
+            virtual ~UserView() = default;
+            virtual const UserSnapshot& get_snapshot() const = 0;
+            // Convenience observers delegating to snapshot (for client code using view->get_capital() etc.)
+            double get_capital() const { return get_snapshot().capital; }
+            double get_realized_pnl() const { return get_snapshot().realized_pnl; }
+            double get_total_volume() const { return get_snapshot().total_volume; }
+            UserId get_user_id() const { return get_snapshot().user_id; }
+            const std::string& get_ticker() const { return get_snapshot().ticker; }
+            double get_position() const { return get_snapshot().position; }
+            virtual double get_committed_sell_qty() const { return 0.0; }
+            virtual double get_total_reserved_cash() const { return 0.0; }
+            virtual std::vector<std::pair<double, double>> get_open_bids() const { return {}; }
+            virtual std::vector<std::pair<double, double>> get_open_asks() const { return {}; }
+            double get_unrealized_pnl() const { return get_snapshot().unrealized_pnl; }
+            std::unordered_map<std::string, double> get_all_positions() const {
+                const auto& s = get_snapshot();
+                if (s.ticker.empty()) return {};
+                return {{ s.ticker, s.position }};
+            }
+        };
+
+        class User : public UserView
+        {
+            friend struct backtest::runtime::UserAPI;
         public:
             User()
-            : user_id_(INVALID_USER_ID), runtime_(nullptr), sync_order_api_(nullptr), capital_(0.0), realized_pnl_(0.0), total_volume_(0.0)
-            {}
+            : strategy_(), runtime_(nullptr), user_id_(INVALID_USER_ID), sync_order_api_(nullptr), capital_(0.0), realized_pnl_(0.0), total_volume_(0.0), strategy_engine_id_(backtest::runtime::INVALID_ENGINE_ID), position_(0.0), avg_price_(0.0)
+            { published_snapshot_ptr_.store(&snapshots_[0], std::memory_order_relaxed); }
 
             User(
                 backtest::user::Strategy&& strategy,
                 backtest::runtime::EngineRuntime* runtime,
                 UserId user_id,
                 double initial_capital = 100000.0,
-                backtest::runtime::UserAPI* sync_api = nullptr
+                backtest::runtime::UserAPI* sync_api = nullptr,
+                backtest::runtime::EngineId strategy_engine_id = backtest::runtime::INVALID_ENGINE_ID
             )
-            : strategy_(std::move(strategy)), runtime_(runtime), user_id_(user_id), sync_order_api_(sync_api), capital_(initial_capital), realized_pnl_(0.0), total_volume_(0.0)
-            {}
+            : strategy_(std::move(strategy)), runtime_(runtime), user_id_(user_id), sync_order_api_(sync_api), capital_(initial_capital), realized_pnl_(0.0), total_volume_(0.0), strategy_engine_id_(strategy_engine_id), position_(0.0), avg_price_(0.0)
+            {
+                published_snapshot_ptr_.store(&snapshots_[0], std::memory_order_relaxed);
+                update_snapshot();
+            }
+
+            User(User&& other) noexcept;
+            User& operator=(User&& other) noexcept;
 
             void on_book_update()
             {
                 if (strategy_) strategy_(this);
             }
 
-            // Order Submissions (sync when registered; returns order ID or engine::INVALID_ORDER_ID)
-            engine::OrderId submit_limit_order(const std::string& ticker, engine::OrderSide side, double price, double quantity);
-            engine::OrderId submit_market_order(const std::string& ticker, engine::OrderSide side, double quantity);
-            bool submit_cancel_order(const std::string& ticker, engine::OrderId order_id);
-            bool submit_edit_order(const std::string& ticker, engine::OrderId order_id, double new_price, double new_quantity);
+            // UserView: observational snapshot (override)
+            const UserSnapshot& get_snapshot() const override;
+            double get_committed_sell_qty() const override;
+            double get_total_reserved_cash() const override;
+            std::vector<std::pair<double, double>> get_open_bids() const override;
+            std::vector<std::pair<double, double>> get_open_asks() const override;
 
-            // Market Metrics (sync)
-            inline double get_best_bid(const std::string& ticker) const;
-            inline double get_best_ask(const std::string& ticker) const;
-            inline double get_market_price(const std::string& ticker) const;
-            inline std::vector<std::pair<double,double>> get_market_depth(const std::string& ticker, engine::OrderSide side, std::size_t depth) const;
+            // Called by runtime after each strategy tick to publish state to snapshot (main-thread reads)
+            void update_snapshot() noexcept;
+
+            // Order Submissions (sync when registered; strategy bound to one ticker, no ticker param)
+            engine::OrderId submit_limit_order(engine::OrderSide side, double price, double quantity);
+            engine::OrderId submit_market_order(engine::OrderSide side, double quantity);
+            bool submit_cancel_order(engine::OrderId order_id);
+            bool submit_replace_order(engine::OrderId order_id, double new_price, double new_quantity);
+            bool submit_edit_order(engine::OrderId order_id, double new_quantity);
+
+            // Market Metrics (sync; use strategy's engine)
+            inline double get_best_bid() const;
+            inline double get_best_ask() const;
+            inline double get_market_price() const;
+            inline std::vector<std::pair<double,double>> get_market_depth(engine::OrderSide side, std::size_t depth = 10) const;
             inline std::vector<std::string> list_tickers() const;
 
-            // User Managment
-            inline std::vector<engine::OrderId> get_positions(const std::string& ticker) const;  // Returns all order IDs (including freed slots)
-            inline std::vector<engine::OrderId> get_active_orders(const std::string& ticker) const;  // Returns only currently active orders (recommended)
-            inline bool has_sufficient_shares(const std::string& ticker, engine::Quantity qty) const;
-            inline double get_position(const std::string& ticker) const;
-            inline double get_committed_sell_qty(const std::string& ticker) const;
-            inline const std::unordered_map<std::string,double>& get_all_positions() const;
-            inline double get_unrealized_pnl(const std::string& ticker, double current_price) const;
-            inline const engine::OrderInfo* get_order_info(const std::string& ticker, engine::OrderId order_id) const;
-            UserId get_user_id() const { return user_id_; }
-            double get_capital() const { return capital_; }
-            double get_realized_pnl() const { return realized_pnl_; }
-            double get_total_volume() const { return total_volume_; }
+            // User Management (strategy's engine)
+            inline std::vector<engine::OrderId> get_positions() const;
+            inline std::vector<engine::OrderId> get_active_orders() const;
+            inline bool has_sufficient_shares(engine::Quantity qty) const;
+            inline double get_unrealized_pnl(double current_price) const;
+            inline const engine::OrderInfo* get_order_info(engine::OrderId order_id) const;
 
         private:
-            // Internals
-            inline void update_position(const std::string& ticker, double qty, double price);
+            inline void update_position(double qty, double price);
             inline void update_realized_pnl(double pnl);
-            void reserve_on_accept(const std::string& ticker, engine::OrderId order_id, engine::OrderSide side, double qty, double price);
-            void release_reservation(engine::OrderId order_id);
-            void apply_fill(const std::string& ticker, engine::OrderId order_id, engine::OrderSide side, double qty, double price);
+            void reserve_on_accept(engine::OrderId order_id, engine::OrderSide side, double qty, double price);
+            void release_reservation(engine::OrderId order_id, engine::OrderSide side, double remaining_qty, double price);
+            void apply_fill(engine::OrderId order_id, engine::OrderSide side, double qty, double price);
 
             Strategy strategy_;
             backtest::runtime::EngineRuntime* runtime_;
@@ -108,14 +144,14 @@ namespace backtest
             double realized_pnl_;
             double total_volume_;
 
-            std::unordered_map<std::string,double> positions_;
-            std::unordered_map<std::string,double> avg_prices_;
-            std::unordered_map<std::string,double> committed_sell_qty_; // O(1) ASK ownership check
+            backtest::runtime::EngineId strategy_engine_id_;
+            double position_;
+            double avg_price_;
 
-            std::vector<double> reserved_cash_;
-            std::vector<double> reserved_qty_;
-            std::vector<engine::OrderSide> reserve_side_;
-            std::vector<std::string> reserved_ticker_;
+            // Double-buffered snapshot for lock-free main-thread reads (mirror OrderEngine)
+            UserSnapshot snapshots_[2];
+            std::atomic<std::size_t> active_snapshot_index_{0};
+            alignas(engine::CACHE_LINE) std::atomic<const UserSnapshot*> published_snapshot_ptr_;
         };
     }
 
@@ -125,6 +161,7 @@ namespace backtest
         class EngineRuntime
         {
             friend struct UserAPI;
+            friend class user::User;
         public:
             // Delete copy constructor and assignment operator
             EngineRuntime(const EngineRuntime&) = delete;
@@ -133,27 +170,30 @@ namespace backtest
             // Singleton instance accessor
             static EngineRuntime& get_instance(
                 std::size_t num_threads = 1, // Num of Threads to Execute Engines
-                std::size_t default_capacity = 1048576, // Default Size Created Engine 
                 bool verbose = false, // Notification System ON / OFF
-                std::size_t quantum_orders = 4096 // Interval Between User Strategy Executions & SnapShot Updates
+                std::size_t quantum_orders = 4096, // Interval Between User Strategy Executions & SnapShot Updates
+                std::size_t max_capacity = 1048576, // Max order pool size per engine
+                std::size_t max_engine_count = 100, // Reserve space for this many stocks/engines (avoids realloc of engines_info_ / user_orders_)
+                std::size_t max_strategies = 1000 // Reserve space for this many strategies/users (keeps UserView* from register_strategy valid)
             );
             
             // Reset State of instance to allow reinitialization
             static void reset_instance();
             
             // Stock registration (rvalue; use std::forward when passing strings on)
-            bool register_stock(std::string&& ticker, double ipo_price, double ipo_qty, std::size_t capacity = 0);
-            bool unregister_stock(std::string&& ticker);
+            bool register_stock(const std::string& ticker, double ipo_price, double ipo_qty, std::size_t capacity = 0);
+            bool unregister_stock(const std::string& ticker);
 
-            // Order submission (async by default; returns order ID or engine::INVALID_ORDER_ID; sync path returns real ID when used via User)
-            engine::OrderId submit_limit_order(const std::string& ticker, engine::OrderSide side, double price, double qty, user::UserId user_id = user::INVALID_USER_ID);
-            engine::OrderId submit_market_order(const std::string& ticker, engine::OrderSide side, double qty, user::UserId user_id = user::INVALID_USER_ID);
-            bool submit_cancel_order(const std::string& ticker, engine::OrderId order_id, user::UserId user_id = user::INVALID_USER_ID);
-            bool submit_edit_order(const std::string& ticker, engine::OrderId order_id, double new_price, double new_qty, user::UserId user_id = user::INVALID_USER_ID);
+            // Order submission (async by default; untracked only). For tracked orders use User::submit_* (sync).
+            engine::OrderId submit_limit_order(const std::string& ticker, engine::OrderSide side, double price, double qty);
+            engine::OrderId submit_market_order(const std::string& ticker, engine::OrderSide side, double qty);
+            bool submit_cancel_order(const std::string& ticker, engine::OrderId order_id);
+            bool submit_replace_order(const std::string& ticker, engine::OrderId order_id, double new_price, double new_qty);
+            bool submit_edit_order(const std::string& ticker, engine::OrderId order_id, double new_qty);
 
-            // Market data / snapshot (public)
+            // Market data / snapshot (public; ticker only)
             const engine::MarketSnapshot* get_snapshot(const std::string& ticker) const;
-            bool request_snapshot(const std::string& ticker) const;
+            bool request_snapshot(const std::string& ticker);
             const engine::OrderInfo* get_order(const std::string& ticker, engine::OrderId order_id) const;
             std::vector<std::string> list_tickers() const noexcept;
 
@@ -173,8 +213,8 @@ namespace backtest
             bool get_notify_order() const noexcept { return notify_order_.load(std::memory_order_acquire); }
 
             // Per-ticker L2 recording (written by event management thread; hot path is lock-free)
-            void set_record(std::string&& ticker, bool enable) noexcept;
-            void set_record(std::string&& ticker, bool enable, std::string&& path_override) noexcept;
+            void set_record(const std::string& ticker, bool enable) noexcept;
+            void set_record(const std::string& ticker, bool enable, const std::string& path_override) noexcept;
             bool get_record(const std::string& ticker) const noexcept;
            
             // Control engine matching (toggle ON/OF allowing for control of books)
@@ -198,12 +238,12 @@ namespace backtest
             // Registers stock and starts simulation asynchronously
             // Use is_simulation_running(), get_simulation_metrics() to monitor progress
             bool simulate(
-                std::string&& filepath,
-                std::string&& ticker,
+                const std::string& filepath,
+                const std::string& ticker,
                 std::size_t target_orders = 0,
                 std::size_t price_sample_size = 10,
                 double shares_outstanding = 1000000.0,
-                std::string&& record_path = {}
+                const std::string& record_path = {}
             );
             
             // Async simulation status methods
@@ -229,17 +269,17 @@ namespace backtest
             std::size_t get_cancelled_count(const std::string& ticker) const;
             std::size_t get_open_count(const std::string& ticker) const;
 
-            // User positions by user_id (order IDs for a user on a ticker)
+            // User positions by user_id (ticker only)
             std::vector<engine::OrderId> get_positions(user::UserId user_id, const std::string& ticker) const;
             std::vector<engine::OrderId> get_active_orders(user::UserId user_id, const std::string& ticker) const;
-            
-            // Strategy Registration (ticker required for deterministic per-engine quantum)
-            user::User* register_strategy(std::string&& ticker, user::Strategy strategy, double starting_capital = 100000.0);
+
+            // Strategy Registration (ticker required for deterministic per-engine quantum). Returns UserView* so client cannot call submit*.
+            user::UserView* register_strategy(const std::string& ticker, user::Strategy strategy, double starting_capital = 100000.0);
             bool unregister_strategy(user::UserId user_id);
 
         private:
             // Private constructor for singleton
-            EngineRuntime(std::size_t num_threads, std::size_t default_capacity, bool verbose, std::size_t quantum_orders);
+            EngineRuntime(std::size_t num_threads, bool verbose, std::size_t quantum_orders, std::size_t max_capacity, std::size_t max_engine_count, std::size_t max_strategies);
             ~EngineRuntime();
             
             static inline bool instance_initialized_ = false; // Track if instance is created
@@ -248,13 +288,19 @@ namespace backtest
             void start_event_management_thread() noexcept;
             void stop_event_management_thread() noexcept;
             void event_management_loop() noexcept;
-            void notify(std::string&& message) noexcept;
+            void notify(const std::string& message) noexcept;
             void record(EngineId engine_id, const stream::L2Update& update) noexcept;
             void record_book_snapshot(EngineId engine_id) noexcept;
 
             // Snapshot management
             void update_snapshot_internal(EngineId engine_id) const noexcept;
+            void refresh_user_snapshots_for_engine(EngineId engine_id);
             const engine::MarketSnapshot* get_snapshot_fast(EngineId engine_id) const noexcept;
+            const engine::MarketSnapshot* get_snapshot(EngineId engine_id) const;
+            const std::string& get_ticker(EngineId engine_id) const;
+            const engine::OrderInfo* get_order(EngineId engine_id, engine::OrderId order_id) const;
+            std::vector<engine::OrderId> get_positions(user::UserId user_id, EngineId engine_id) const;
+            std::vector<engine::OrderId> get_active_orders(user::UserId user_id, EngineId engine_id) const;
 
             // User-scoped helper (private; exposed via UserAPI::has_sufficient_shares)
             bool user_has_sufficient_shares(user::UserId user_id, const std::string& ticker, engine::Quantity qty) const;
@@ -272,8 +318,10 @@ namespace backtest
             engine::OrderId submit_market_order_sync_impl(const std::string& ticker, engine::OrderSide side, double qty, user::UserId user_id);
             bool submit_cancel_order_async_impl(const std::string& ticker, engine::OrderId order_id, user::UserId user_id);
             bool submit_cancel_order_sync_impl(const std::string& ticker, engine::OrderId order_id, user::UserId user_id);
-            bool submit_edit_order_async_impl(const std::string& ticker, engine::OrderId order_id, double new_price, double new_qty, user::UserId user_id);
-            bool submit_edit_order_sync_impl(const std::string& ticker, engine::OrderId order_id, double new_price, double new_qty, user::UserId user_id);
+            bool submit_replace_order_async_impl(const std::string& ticker, engine::OrderId order_id, double new_price, double new_qty, user::UserId user_id);
+            bool submit_replace_order_sync_impl(const std::string& ticker, engine::OrderId order_id, double new_price, double new_qty, user::UserId user_id);
+            bool submit_edit_order_async_impl(const std::string& ticker, engine::OrderId order_id, double new_qty, user::UserId user_id);
+            bool submit_edit_order_sync_impl(const std::string& ticker, engine::OrderId order_id, double new_qty, user::UserId user_id);
             
             // Helper functions for common operations
             void notify_order_event(const std::string& prefix, engine::OrderId order_id, engine::EventKind event_kind) noexcept;
@@ -286,31 +334,27 @@ namespace backtest
             TickerMap ticker_to_engine_id_; // Maps ticker -> engine_id for user-facing API
             scheduler::JobScheduler scheduler_; // Scheduler for concurrent async job execution
             std::size_t num_workers_;  // Number of worker threads
-            std::size_t default_capacity_; // Default capacity for new OrderEngines
+            std::size_t max_capacity_; // Max order pool size per engine
             std::atomic<std::size_t> runtime_batch_size_; // Runtime-enforced batch size for flushing jobs to workers
             bool verbose_; // Verbose Mode
             std::atomic<bool> notify_order_{false}; // Control order fill notifications
             
-            // Order ownership tracking: user_orders_[user_id][engine_id] = {order_ids}
-            // Index 0 reserved for IPO_HOLDER, registered users start from index 1
+            // Order ownership: engine-first user_orders_[engine_id].by_user[user_id] = set; index 0 reserved for IPO_HOLDER
             UserOrderMap user_orders_;
-            std::unordered_map<engine::OrderId, user::UserId> order_to_user_; // OrderId -> UserId
             // Strategy management (raw pointers, caller manages lifetime)
             std::vector<user::User> users_;
-            // Per-engine strategy indices: users_per_engine_[engine_id] = indices into users_
-            std::vector<std::vector<std::size_t>> users_per_engine_;
             // strategy_engine_id_[idx] = engine_id for users_[idx] (parallel to users_)
             std::vector<EngineId> user_strategy_engine_id_;
             
-            // Fast snapshot access cache: store pointer to the engine so we can fetch
-            std::vector<engine::OrderEngine*> snapshot_cache_;
-            
             const std::size_t quantum_orders_; // Quantum in order count (immutable after construction)
+            const std::size_t max_engine_count_; // Max engines (register_stock fails when at limit)
+            const std::size_t max_strategies_; // Max strategies (for reserving user_strategy_engine_id_ / by_user, avoids resize realloc)
 
             alignas(engine::CACHE_LINE) std::atomic<bool> event_management_thread_running_{false}; // Event management thread control
             std::thread event_management_thread_; // Event management thread (drains log + record buffers)
             static constexpr std::size_t LOG_BUFFER_CAPACITY = 65536;
             static constexpr std::size_t RECORD_BUFFER_CAPACITY = 65536;
+            static constexpr std::size_t USER_ORDERS_PER_USER_BASE_CAPACITY = 4096;
             using RecordItem = std::pair<EngineId, stream::L2Update>;
             DoubleBuffer<std::string> log_buffer_;
             DoubleBuffer<RecordItem> record_buffer_;
@@ -340,36 +384,36 @@ namespace backtest
     // Inline User method implementations (must be after EngineRuntime is fully defined)
     namespace user
     {
-        inline std::vector<engine::OrderId> User::get_positions(const std::string& ticker) const
+        inline std::vector<engine::OrderId> User::get_positions() const
         {
-            return sync_order_api_ ? sync_order_api_->get_positions(user_id_, ticker) : std::vector<engine::OrderId>{};
+            return sync_order_api_ ? sync_order_api_->get_positions(user_id_, get_ticker()) : std::vector<engine::OrderId>{};
         }
 
-        inline std::vector<engine::OrderId> User::get_active_orders(const std::string& ticker) const
+        inline std::vector<engine::OrderId> User::get_active_orders() const
         {
-            return sync_order_api_ ? sync_order_api_->get_active_orders(user_id_, ticker) : std::vector<engine::OrderId>{};
+            return sync_order_api_ ? sync_order_api_->get_active_orders(user_id_, get_ticker()) : std::vector<engine::OrderId>{};
         }
 
-        inline bool User::has_sufficient_shares(const std::string& ticker, engine::Quantity qty) const
+        inline bool User::has_sufficient_shares(engine::Quantity qty) const
         {
-            return sync_order_api_ ? sync_order_api_->has_sufficient_shares(user_id_, ticker, qty) : false;
+            return sync_order_api_ ? sync_order_api_->has_sufficient_shares(user_id_, get_ticker(), qty) : false;
         }
 
-        inline double User::get_best_bid(const std::string& ticker) const
+        inline double User::get_best_bid() const
         {
-            const auto* s = runtime_ ? runtime_->get_snapshot(ticker) : nullptr;
+            const auto* s = runtime_ && strategy_engine_id_ != backtest::runtime::INVALID_ENGINE_ID ? runtime_->get_snapshot(strategy_engine_id_) : nullptr;
             return s && s->best_bid != static_cast<engine::Price>(-1) ? math::ticks_to_dollars(s->best_bid) : -1.0;
         }
 
-        inline double User::get_best_ask(const std::string& ticker) const
+        inline double User::get_best_ask() const
         {
-            const auto* s = runtime_ ? runtime_->get_snapshot(ticker) : nullptr;
+            const auto* s = runtime_ && strategy_engine_id_ != backtest::runtime::INVALID_ENGINE_ID ? runtime_->get_snapshot(strategy_engine_id_) : nullptr;
             return s && s->best_ask != static_cast<engine::Price>(-1) ? math::ticks_to_dollars(s->best_ask) : -1.0;
         }
 
-        inline double User::get_market_price(const std::string& ticker) const
+        inline double User::get_market_price() const
         {
-            const auto* s = runtime_ ? runtime_->get_snapshot(ticker) : nullptr;
+            const auto* s = runtime_ && strategy_engine_id_ != backtest::runtime::INVALID_ENGINE_ID ? runtime_->get_snapshot(strategy_engine_id_) : nullptr;
             if (!s) return -1.0;
             if (s->best_bid != static_cast<engine::Price>(-1) && s->best_ask != static_cast<engine::Price>(-1))
                 return (math::ticks_to_dollars(s->best_bid) + math::ticks_to_dollars(s->best_ask)) / 2.0;
@@ -379,9 +423,9 @@ namespace backtest
             return -1.0;
         }
 
-        inline std::vector<std::pair<double, double>> User::get_market_depth(const std::string& ticker, engine::OrderSide side, std::size_t depth) const
+        inline std::vector<std::pair<double, double>> User::get_market_depth(engine::OrderSide side, std::size_t depth) const
         {
-            const auto* snap = runtime_ ? runtime_->get_snapshot(ticker) : nullptr;
+            const auto* snap = runtime_ && strategy_engine_id_ != backtest::runtime::INVALID_ENGINE_ID ? runtime_->get_snapshot(strategy_engine_id_) : nullptr;
             std::vector<std::pair<double, double>> out;
             if (!snap) return out;
             if (side == engine::OrderSide::BID) {
@@ -403,37 +447,14 @@ namespace backtest
             return runtime_ ? runtime_->list_tickers() : std::vector<std::string>{};
         }
 
-        inline const engine::OrderInfo* User::get_order_info(const std::string& ticker, engine::OrderId order_id) const
+        inline const engine::OrderInfo* User::get_order_info(engine::OrderId order_id) const
         {
-            return runtime_ ? runtime_->get_order(ticker, order_id) : nullptr;
+            return runtime_ && strategy_engine_id_ != backtest::runtime::INVALID_ENGINE_ID ? runtime_->get_order(strategy_engine_id_, order_id) : nullptr;
         }
 
-        inline double User::get_position(const std::string& ticker) const
+        inline double User::get_unrealized_pnl(double current_price) const
         {
-            auto it = positions_.find(ticker);
-            return it != positions_.end() ? it->second : 0.0;
-        }
-
-        inline double User::get_committed_sell_qty(const std::string& ticker) const
-        {
-            auto it = committed_sell_qty_.find(ticker);
-            return it != committed_sell_qty_.end() ? it->second : 0.0;
-        }
-
-        inline const std::unordered_map<std::string, double>& User::get_all_positions() const
-        {
-            return positions_;
-        }
-
-        inline double User::get_unrealized_pnl(const std::string& ticker, double current_price) const
-        {
-            auto it = positions_.find(ticker);
-            if (it == positions_.end()) return 0.0;
-
-            auto avg_it = avg_prices_.find(ticker);
-            if (avg_it == avg_prices_.end()) return 0.0;
-
-            return it->second * (current_price - avg_it->second);
+            return position_ * (current_price - avg_price_);
         }
 
         inline void User::update_realized_pnl(double pnl)
@@ -441,71 +462,42 @@ namespace backtest
             realized_pnl_ += pnl;
         }
 
-        inline void User::update_position(const std::string& ticker, double qty, double price)
+        inline void User::update_position(double qty, double price)
         {
-            double prev_pos = 0.0;
-            auto it = positions_.find(ticker);
-            if (it != positions_.end()) prev_pos = it->second;
+            double prev_pos = position_;
 
-            // Compute realized pnl when this fill reduces or flips exposure
-            // If signs differ, some quantity is closing existing position
             double realized = 0.0;
             if (prev_pos != 0.0 && ((prev_pos > 0 && qty < 0) || (prev_pos < 0 && qty > 0))) {
                 double closing_qty = std::min(std::abs(prev_pos), std::abs(qty));
-                // Get previous average price (if present)
-                double prev_avg = 0.0;
-                auto a_it = avg_prices_.find(ticker);
-                if (a_it != avg_prices_.end()) prev_avg = a_it->second;
+                double prev_avg = avg_price_;
 
-                if (prev_pos > 0 && qty < 0) {
-                    // Long being sold
+                if (prev_pos > 0 && qty < 0)
                     realized = closing_qty * (price - prev_avg);
-                } else if (prev_pos < 0 && qty > 0) {
-                    // Short being covered
+                else if (prev_pos < 0 && qty > 0)
                     realized = closing_qty * (prev_avg - price);
-                }
-                // Update realized pnl and capital for closed portion
+
                 realized_pnl_ += realized;
-                capital_ += realized; // realize gains/losses into capital
+                capital_ += realized;
             }
 
-            // Update position and average price
             double new_pos = prev_pos + qty;
-            positions_[ticker] = new_pos;
+            position_ = new_pos;
 
             if (new_pos != 0.0) {
-                // Recalculate average price for remaining/net position
-                double prev_avg = 0.0;
-                auto a_it = avg_prices_.find(ticker);
-                if (a_it != avg_prices_.end()) prev_avg = a_it->second;
-
-                // If previous position had same sign as new trade, update weighted avg
+                double prev_avg = avg_price_;
                 if ((prev_pos >= 0 && qty >= 0) || (prev_pos <= 0 && qty <= 0)) {
                     double total_qty = std::abs(prev_pos) + std::abs(qty);
-                    if (total_qty > 0) {
-                        avg_prices_[ticker] = (prev_avg * std::abs(prev_pos) + price * std::abs(qty)) / total_qty;
-                    } else {
-                        avg_prices_[ticker] = price;
-                    }
+                    avg_price_ = total_qty > 0 ? (prev_avg * std::abs(prev_pos) + price * std::abs(qty)) / total_qty : price;
                 } else {
-                    // If position decreased or flipped, preserve previous avg for remaining portion
-                    if (std::abs(new_pos) > 0) {
-                        // remaining side keeps previous avg
-                        avg_prices_[ticker] = prev_avg;
-                    } else {
-                        // Position closed
-                        avg_prices_.erase(ticker);
-                    }
+                    if (std::abs(new_pos) > 0)
+                        avg_price_ = prev_avg;
+                    else
+                        avg_price_ = 0.0;
                 }
             } else {
-                // Position fully closed
-                avg_prices_.erase(ticker);
+                avg_price_ = 0.0;
             }
 
-            // Update capital for the trade amount (buys reduce capital, sells increase)
-            // NOTE: capital impact for accepted orders is handled via reservation logic.
-            // Here we only update realized pnl and positions; do not deduct/add trade cash
-            // because cash was reserved on ACCEPT and reconciled on fills via apply_fill().
             total_volume_ += std::abs(qty);
         }
     }

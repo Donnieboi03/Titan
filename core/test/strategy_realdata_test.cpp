@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <iomanip>
+#include <sstream>
 #include <chrono>
 #include <string>
 #include <cassert>
@@ -27,227 +28,105 @@ struct StrategyStats {
 
 StrategyStats strategy_stats;
 
-// Simple market maker strategy
+// Simple market maker strategy (bound to one ticker)
 void market_maker_strategy(User* user) {
-    auto tickers = user->list_tickers();
-    
-    for (const auto& ticker : tickers) {
-        double bid = user->get_best_bid(ticker);
-        double ask = user->get_best_ask(ticker);
-        
-        // Track best prices
-        if (ask > 0 && (strategy_stats.best_price_seen == 0.0 || ask < strategy_stats.best_price_seen)) {
-            strategy_stats.best_price_seen = ask;
-        }
-        
-        strategy_stats.market_updates++;
-        
-        // Only trade if we have valid market data
-        if (bid > 0 && ask > 0) {
-            double mid = (bid + ask) / 2.0;
-            double spread = (ask - bid);
-            
-            // Place passive orders on both sides (market making)
-            // Only if spread is reasonable (less than 1% of mid price)
-            if (spread > 0.01 && spread < (mid * 0.01)) {
-                // Buy below mid
-                if (user->submit_limit_order(ticker, OrderSide::BID, mid - (spread / 4.0), 0.001) != engine::INVALID_ORDER_ID) {
-                    strategy_stats.orders_placed++;
-                }
-                
-                // Sell above mid  
-                if (user->submit_limit_order(ticker, OrderSide::ASK, mid + (spread / 4.0), 0.001) != engine::INVALID_ORDER_ID) {
-                    strategy_stats.orders_placed++;
-                }
+    double bid = user->get_best_bid();
+    double ask = user->get_best_ask();
+
+    if (ask > 0 && (strategy_stats.best_price_seen == 0.0 || ask < strategy_stats.best_price_seen)) {
+        strategy_stats.best_price_seen = ask;
+    }
+
+    strategy_stats.market_updates++;
+
+    if (bid > 0 && ask > 0) {
+        double mid = (bid + ask) / 2.0;
+        double spread = (ask - bid);
+
+        if (spread > 0.01 && spread < (mid * 0.01)) {
+            if (user->submit_limit_order(OrderSide::BID, mid - (spread / 4.0), 0.001) != engine::INVALID_ORDER_ID) {
+                strategy_stats.orders_placed++;
+            }
+            if (user->submit_limit_order(OrderSide::ASK, mid + (spread / 4.0), 0.001) != engine::INVALID_ORDER_ID) {
+                strategy_stats.orders_placed++;
             }
         }
     }
 }
 
-// Aggressive taker strategy - crosses the spread
+// Aggressive taker strategy - crosses the spread (bound to one ticker)
 void aggressive_taker_strategy(User* user) {
-    auto tickers = user->list_tickers();
-    
-    for (const auto& ticker : tickers) {
-        double bid = user->get_best_bid(ticker);
-        double ask = user->get_best_ask(ticker);
-        
-        strategy_stats.market_updates++;
-        
-        // Randomly buy or sell at market prices (more frequently)
-        if (ask > 0 && strategy_stats.market_updates % 50 == 0) {
-            // Buy at ask (take liquidity)
-            if (user->submit_limit_order(ticker, OrderSide::BID, ask, 0.0001) != engine::INVALID_ORDER_ID) {
-                strategy_stats.orders_placed++;
-            }
+    double bid = user->get_best_bid();
+    double ask = user->get_best_ask();
+
+    strategy_stats.market_updates++;
+
+    if (ask > 0 && strategy_stats.market_updates % 50 == 0) {
+        if (user->submit_limit_order(OrderSide::BID, ask, 0.0001) != engine::INVALID_ORDER_ID) {
+            strategy_stats.orders_placed++;
         }
-        
-        if (bid > 0 && strategy_stats.market_updates % 75 == 0) {
-            // Sell at bid (take liquidity)
-            if (user->submit_limit_order(ticker, OrderSide::ASK, bid, 0.0001) != engine::INVALID_ORDER_ID) {
-                strategy_stats.orders_placed++;
-            }
+    }
+
+    if (bid > 0 && strategy_stats.market_updates % 75 == 0) {
+        if (user->submit_limit_order(OrderSide::ASK, bid, 0.0001) != engine::INVALID_ORDER_ID) {
+            strategy_stats.orders_placed++;
         }
     }
 }
 
-void test_strategy_with_real_data(const std::string& data_file, const std::string& ticker) {
+void test_strategy_with_real_data(std::string& data_file, const std::string& ticker) {
     std::cout << "\n=== Strategy Test with Real Market Data ===\n";
     std::cout << "Data File: " << data_file << "\n";
     std::cout << "Ticker: " << ticker << "\n\n";
     
     // Configurable parameters
-    constexpr uint64_t MAX_EVENTS = 100000000;  // Adjust this to process more/fewer events
-    constexpr int PRICE_SAMPLE_SIZE = 5;     // Number of orders to average for initial price
+    constexpr uint64_t MAX_EVENTS = 0;  // Adjust this to process more/fewer events
+    constexpr uint64_t BATCH_INTERVAL = 25000;   // More frequent processing
+    constexpr uint64_t STRATEGY_INTERVAL = 5000; // More frequent strategy calls
     
     // Reset runtime
     EngineRuntime::reset_instance();
-    auto& runtime = EngineRuntime::get_instance(1, 16 * 1024 * 1024, false);
-    
-    // Parse first 5 orders to get average initial price
-    L2Stream price_parser(data_file);
-    L2Update price_update;
-    double initial_price = 95000.0;  // Realistic BTCUSDT price as fallback
-    std::vector<double> first_prices;
-    
-    // Get exactly first 5 orders for price averaging
-    int count = 0;
-    while (count < PRICE_SAMPLE_SIZE && price_parser.parse_next(price_update)) {
-        if (!price_update.is_snapshot && price_update.amount > 0) {
-            first_prices.push_back(price_update.price);
-            count++;
-        }
-    }
-    
-    if (!first_prices.empty()) {
-        // Calculate average of first 5 orders
-        double sum = 0.0;
-        for (double price : first_prices) {
-            sum += price;
-        }
-        initial_price = sum / first_prices.size();
-    }
-    
-    std::cout << "Initial Price (avg of first " << first_prices.size() << " orders): $" 
-              << std::fixed << std::setprecision(2) << initial_price << "\n";
-    std::cout << "Event Limit: " << MAX_EVENTS << "\n\n";
-    
-    // Register stock with reasonable IPO quantity (1 BTC worth)
-    runtime.register_stock(std::string(ticker), initial_price, 1.0);
+
+    // Init Runtime (max_strategies >= 10002 so 10k registrations below don't reallocate users_ and invalidate maker/taker)
+    auto& runtime = EngineRuntime::get_instance(1, false, STRATEGY_INTERVAL, 8 * 1024 * 1024, 16, 100250);
+    //runtime.set_batch_size(BATCH_INTERVAL);
+
+    // Stage Simulate
+    runtime.simulate
+    (
+        std::move(data_file), // Real Data Path
+        std::string(ticker),  // Name of Market
+        MAX_EVENTS            // Max Amount of Events 
+    );
     
     // Register strategies for this ticker
-    User* maker = runtime.register_strategy(std::string(ticker), market_maker_strategy, 100000.0);
-    User* taker = runtime.register_strategy(std::string(ticker), aggressive_taker_strategy, 100000.0);
+    UserView* maker = runtime.register_strategy(std::string(ticker), market_maker_strategy, 100000.0);
+    UserView* taker = runtime.register_strategy(std::string(ticker), aggressive_taker_strategy, 100000.0);
+    
+    for (int i = 0; i < 10000; i++)
+    {
+        runtime.register_strategy(std::string(ticker), aggressive_taker_strategy, 100000.0);
+    }
     
     std::cout << "Market Maker (User " << maker->get_user_id() << "): $" << maker->get_capital() << " capital\n";
     std::cout << "Aggressive Taker (User " << taker->get_user_id() << "): $" << taker->get_capital() << " capital\n\n";
     
-    // Disable auto-matching for performance
-    runtime.set_auto_match(ticker, false);
-    constexpr uint64_t BATCH_INTERVAL = 25000;   // More frequent processing
-    constexpr uint64_t STRATEGY_INTERVAL = 5000; // More frequent strategy calls
-    
-    // Parse and replay market data
-    std::cout << "Parsing market data...\n";
-    L2Stream parser(data_file);
-    L2Update update;
-    uint64_t event_count = 0;
-    uint64_t orders_submitted = 0;
-    uint64_t snapshots_skipped = 0;
-    uint64_t zero_deltas_skipped = 0;
-    uint64_t invalid_price_skipped = 0;
-    uint64_t deletion_events = 0;  // Track amount=0 events
-    
-    // Cache for tracking price levels
-    std::unordered_map<uint64_t, double> price_cache;
-    
-    auto make_key = [](double price, char side) -> uint64_t {
-        Price price_ticks = backtest::math::dollars_to_ticks(price);
-        uint64_t side_bit = (side == 'b' || side == 'B') ? 0 : 1;
-        return (price_ticks << 1) | side_bit;
-    };
-    
-    auto start_time = std::chrono::high_resolution_clock::now();
-    
-    while (parser.parse_next(update)) {
-        event_count++;
-        
-        // Skip snapshots
-        if (update.is_snapshot) {
-            snapshots_skipped++;
-            continue;
-        }
-        
-        // Track deletions (amount=0) separately
-        if (update.amount == 0.0) {
-            deletion_events++;
-        }
-        
-        // Process L2 update
-        OrderSide side = (update.side == 'b' || update.side == 'B') ? OrderSide::BID : OrderSide::ASK;
-        uint64_t key = make_key(update.price, update.side);
-        double old_amount = price_cache[key];
-        double delta = update.amount - old_amount;
-        price_cache[key] = update.amount;
-        
-        // Skip invalid prices
-        if (update.price <= 0.0) {
-            invalid_price_skipped++;
-            continue;
-        }
-        
-        // Skip zero deltas
-        if (delta == 0.0) {
-            zero_deltas_skipped++;
-            continue;
-        }
-        
-        // Submit order for delta
-        if (delta > 0.0) {
-            runtime.submit_limit_order(ticker, side, update.price, delta);
-            orders_submitted++;
-        } else {
-            OrderSide opposite = (side == OrderSide::BID) ? OrderSide::ASK : OrderSide::BID;
-            runtime.submit_limit_order(ticker, opposite, update.price, -delta);
-            orders_submitted++;
-        }
-        
-        // Run strategies periodically
-        if (event_count % STRATEGY_INTERVAL == 0) {
-            maker->on_book_update();
-            taker->on_book_update();
-        }
-        
-        // Batch process orders
-        if (event_count % BATCH_INTERVAL == 0) {
-            runtime.process_pending_orders_async();
-        }
-        
-        // Limit test duration for reasonable execution time  
-        if (event_count >= MAX_EVENTS) break;
-    }
-    
     // Final processing
-    std::cout << "\nProcessing final batch...\n";
-    runtime.set_auto_match(ticker, true);
+    std::cout << "\nProcessing Simulation...\n";
     runtime.process_pending_orders();
     
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    double duration_sec = duration.count() / 1000.0;
-    
+    const auto& sim_metrics = runtime.get_simulation_metrics(ticker);
+
     // Print results
     std::cout << "\n=== Replay Results ===\n";
-    std::cout << "Events Processed: " << event_count << "\n";
-    std::cout << "  - Snapshots (skipped): " << snapshots_skipped << "\n";
-    std::cout << "  - Zero Deltas (skipped): " << zero_deltas_skipped << "\n";
-    std::cout << "  - Invalid Prices (skipped): " << invalid_price_skipped << "\n";
-    std::cout << "L2 Orders Submitted: " << orders_submitted << "\n";
-    std::cout << "Verification: " << snapshots_skipped << " + " << zero_deltas_skipped 
-              << " + " << invalid_price_skipped << " + " << orders_submitted 
-              << " = " << (snapshots_skipped + zero_deltas_skipped + invalid_price_skipped + orders_submitted) << "\n";
-    std::cout << "Duration: " << duration_sec << " seconds\n";
-    std::cout << "Throughput: " << (event_count / duration_sec) << " events/sec\n\n";
+    std::cout << "Events Processed: " << sim_metrics.market_updates_processed << "\n";
+    std::cout << "L2 Orders Submitted: " << sim_metrics.orders_placed << "\n";
+    std::cout << "L2 Orders Filled: " << sim_metrics.orders_filled << "\n";
+    std::cout << "L2 Orders Cancelled: " << sim_metrics.orders_cancelled << "\n";
+    std::cout << "L2 Orders Edited: " << sim_metrics.orders_edited << "\n";
+    std::cout << "L2 Orders Replaced: " << sim_metrics.orders_replaced << "\n";
+    std::cout << "Duration: " << sim_metrics.simulation_time_seconds << " seconds\n";
+    std::cout << "Throughput: " << sim_metrics.orders_per_second() << " order ops/sec\n\n";
     
     std::cout << "=== Strategy Statistics ===\n";
     std::cout << "Strategy Orders Placed: " << strategy_stats.orders_placed << "\n";
@@ -257,18 +136,10 @@ void test_strategy_with_real_data(const std::string& data_file, const std::strin
     // Get final market state (request → process → get for fresh snapshot)
     runtime.request_snapshot(ticker);
     runtime.process_pending_orders();
-    const auto* snap_final = runtime.get_snapshot(ticker);
-    double final_bid = -1.0, final_ask = -1.0, market_price = -1.0;
-    if (snap_final) {
-        if (snap_final->best_bid != static_cast<engine::Price>(-1)) final_bid = backtest::math::ticks_to_dollars(snap_final->best_bid);
-        if (snap_final->best_ask != static_cast<engine::Price>(-1)) final_ask = backtest::math::ticks_to_dollars(snap_final->best_ask);
-        if (snap_final->best_bid != static_cast<engine::Price>(-1) && snap_final->best_ask != static_cast<engine::Price>(-1))
-            market_price = (backtest::math::ticks_to_dollars(snap_final->best_bid) + backtest::math::ticks_to_dollars(snap_final->best_ask)) / 2.0;
-        else if (snap_final->best_ask != static_cast<engine::Price>(-1)) market_price = backtest::math::ticks_to_dollars(snap_final->best_ask);
-        else if (snap_final->best_bid != static_cast<engine::Price>(-1)) market_price = backtest::math::ticks_to_dollars(snap_final->best_bid);
-        else if (snap_final->market_price != static_cast<engine::Price>(-1)) market_price = backtest::math::ticks_to_dollars(snap_final->market_price);
-    }
-    
+    auto final_bid = runtime.get_best_bid(ticker);
+    auto final_ask = runtime.get_best_ask(ticker);
+    auto market_price = runtime.get_market_price(ticker);
+
     std::cout << "=== Final Market State ===\n";
     std::cout << "Market Price: $" << market_price << "\n";
     std::cout << "Best Bid: $" << final_bid << "\n";
@@ -276,53 +147,61 @@ void test_strategy_with_real_data(const std::string& data_file, const std::strin
     std::cout << "Spread: $" << (final_ask - final_bid) << "\n\n";
     
     // Show market depth
-    std::vector<std::pair<double, double>> bid_depth, ask_depth;
-    if (snap_final) {
-        size_t n_bid = std::min(static_cast<size_t>(snap_final->bid_levels), size_t(5));
-        bid_depth.reserve(n_bid);
-        for (size_t i = 0; i < n_bid; ++i)
-            bid_depth.emplace_back(backtest::math::ticks_to_dollars(snap_final->bid_prices[i]), backtest::math::internal_to_qty(snap_final->bid_depth[i]));
-        size_t n_ask = std::min(static_cast<size_t>(snap_final->ask_levels), size_t(5));
-        ask_depth.reserve(n_ask);
-        for (size_t i = 0; i < n_ask; ++i)
-            ask_depth.emplace_back(backtest::math::ticks_to_dollars(snap_final->ask_prices[i]), backtest::math::internal_to_qty(snap_final->ask_depth[i]));
+    const auto& top_bids = runtime.get_market_depth(ticker, engine::OrderSide::BID);
+    std::cout << "Top " + std::to_string(top_bids.size()) + " Bids:\n";
+    for(const auto& s : top_bids){
+        std::cout << "  $" << s.first << " (" << s.second << ")\n";
     }
-    std::cout << "Top 5 Bids:\n";
-    for (size_t i = 0; i < bid_depth.size(); ++i) {
-        std::cout << "  $" << bid_depth[i].first << " (" << bid_depth[i].second << ")\n";
+
+    const auto& top_asks = runtime.get_market_depth(ticker, engine::OrderSide::ASK);
+     std::cout << "Top " + std::to_string(top_asks.size()) + " Asks:\n";
+    for(const auto& s : top_asks){
+        std::cout << "  $" << s.first << " (" << s.second << ")\n";
     }
     
-    std::cout << "\nTop 5 Asks:\n";
-    for (size_t i = 0; i < ask_depth.size(); ++i) {
-        std::cout << "  $" << ask_depth[i].first << " (" << ask_depth[i].second << ")\n";
-    }
-    
-    // Show strategy performance
+    // Show strategy performance (Realized P&L = only from closed trades; capital drop can be reserved + open position cost)
     std::cout << "\n=== Strategy Performance ===\n";
+    auto fmt_price = [](double x) { std::ostringstream o; o << std::fixed << std::setprecision(2) << x; return o.str(); };
     std::cout << "Market Maker:\n";
-    std::cout << "  Capital: $" << maker->get_capital() << "\n";
-    std::cout << "  Realized P&L: $" << maker->get_realized_pnl() << "\n";
-    std::cout << "  Total Volume: $" << maker->get_total_volume() << "\n";
-    std::cout << "  Position: " << maker->get_position(ticker) << " shares\n";
-    std::cout << "  Unrealized P&L: $" << maker->get_unrealized_pnl(ticker, market_price) << "\n";
+    std::cout << "  Capital: $" << fmt_price(maker->get_capital()) << "\n";
+    std::cout << "  Reserved cash (open BIDs): $" << fmt_price(maker->get_total_reserved_cash()) << "\n";
+    std::cout << "  Open BIDs: ";
+    { const auto bids = maker->get_open_bids(); if (bids.empty()) std::cout << "(none)\n"; else { std::cout << "\n"; for (const auto& b : bids) std::cout << "    " << b.first << " @ $" << fmt_price(b.second) << "\n"; } }
+    std::cout << "  Committed sell qty (open ASKs): " << maker->get_committed_sell_qty() << " shares\n";
+    std::cout << "  Open ASKs: ";
+    { const auto asks = maker->get_open_asks(); if (asks.empty()) std::cout << "(none)\n"; else { std::cout << "\n"; for (const auto& a : asks) std::cout << "    " << a.first << " @ $" << fmt_price(a.second) << "\n"; } }
+    std::cout << "  Realized P&L: $" << fmt_price(maker->get_realized_pnl()) << " (from closed trades only)\n";
+    std::cout << "  Total Volume (shares): " << maker->get_total_volume() << "\n";
+    std::cout << "  Position: " << maker->get_position() << " shares\n";
+    std::cout << "  Unrealized P&L: $" << fmt_price(maker->get_unrealized_pnl()) << "\n";
     
     std::cout << "\nAggressive Taker:\n";
-    std::cout << "  Capital: $" << taker->get_capital() << "\n";
-    std::cout << "  Realized P&L: $" << taker->get_realized_pnl() << "\n";
-    std::cout << "  Total Volume: $" << taker->get_total_volume() << "\n";
-    std::cout << "  Position: " << taker->get_position(ticker) << " shares\n";
-    std::cout << "  Unrealized P&L: $" << taker->get_unrealized_pnl(ticker, market_price) << "\n";
+    std::cout << "  Capital: $" << fmt_price(taker->get_capital()) << "\n";
+    std::cout << "  Reserved cash (open BIDs): $" << fmt_price(taker->get_total_reserved_cash()) << "\n";
+    std::cout << "  Open BIDs: ";
+    { const auto bids = taker->get_open_bids(); if (bids.empty()) std::cout << "(none)\n"; else { std::cout << "\n"; for (const auto& b : bids) std::cout << "    " << b.first << " @ $" << fmt_price(b.second) << "\n"; } }
+    std::cout << "  Committed sell qty (open ASKs): " << taker->get_committed_sell_qty() << " shares\n";
+    std::cout << "  Open ASKs: ";
+    { const auto asks = taker->get_open_asks(); if (asks.empty()) std::cout << "(none)\n"; else { std::cout << "\n"; for (const auto& a : asks) std::cout << "    " << a.first << " @ $" << fmt_price(a.second) << "\n"; } }
+    std::cout << "  Realized P&L: $" << fmt_price(taker->get_realized_pnl()) << " (from closed trades only)\n";
+    std::cout << "  Total Volume (shares): " << taker->get_total_volume() << "\n";
+    std::cout << "  Position: " << taker->get_position() << " shares\n";
+    std::cout << "  Unrealized P&L: $" << fmt_price(taker->get_unrealized_pnl()) << "\n";
     
     // Get engine statistics (reuse snap_final from request → process → get above)
-    const auto* snap = snap_final;
+    const auto* snap = runtime.get_snapshot(ticker);
     uint64_t placed = snap ? static_cast<uint64_t>(snap->placed_count) : 0;
     uint64_t filled = snap ? static_cast<uint64_t>(snap->filled_count) : 0;
     uint64_t cancelled = snap ? static_cast<uint64_t>(snap->cancelled_count) : 0;
+    uint64_t edited = snap ? static_cast<uint64_t>(snap->edited_count) : 0;
+    uint64_t replaced = snap ? static_cast<uint64_t>(snap->replaced_count) : 0;
     
     std::cout << "\n=== Engine Statistics ===\n";
     std::cout << "Total Orders Placed: " << placed << "\n";
     std::cout << "Total Orders Filled: " << filled << "\n";
     std::cout << "Total Orders Cancelled: " << cancelled << "\n";
+    std::cout << "Total Orders Edited: " << edited << "\n";
+    std::cout << "Total Orders Replaced: " << replaced << "\n";
     std::cout << "Fill Rate: " << std::fixed << std::setprecision(2) 
               << (placed > 0 ? (100.0 * filled / placed) : 0.0) << "%\n";
 }

@@ -6,6 +6,7 @@
 #include "tools/lazy_queue.h"
 #include <unordered_map>
 #include <chrono>
+#include <set>
 
 
 namespace engine
@@ -54,11 +55,10 @@ namespace engine
         OrderStatus status_; // 1 byte
         OrderType type_; // 1 byte
         OrderSide side_; // 1 byte
-        bool in_book_ = true; // whether this order is currently pushed into the book
 
         OrderInfo() = default;
         OrderInfo(OrderSide side, OrderType type, Quantity qty, Price price) noexcept
-        : side_(side), type_(type), status_(OrderStatus::OPEN), qty_(qty), price_(price), time_(now_ns())
+        : time_(now_ns()), price_(price), qty_(qty), status_(OrderStatus::OPEN), type_(type), side_(side)
         {
         }
     };
@@ -185,6 +185,10 @@ namespace engine
             return count;
         }
 
+        inline OrderId get_back_id() const noexcept {
+            return back ? back->id : OrderMemoryPool::INVALID_HANDLE;
+        }
+
         ~OrderLevel() {
             if (!pool) return;
             while (front) {
@@ -196,8 +200,8 @@ namespace engine
     };
 
     using LevelMap = std::unordered_map<Price, OrderLevel>;
-    using BidBook = Heap<Price, HeapType::MAX>;
-    using AskBook = Heap<Price, HeapType::MIN>;
+    using BidBook = std::set<Price>;
+    using AskBook = std::set<Price>;
     
     // Top-K depth tracking (K = number of levels to track)
     constexpr std::size_t DEPTH_K = 15;
@@ -258,7 +262,9 @@ namespace engine
         std::size_t placed_count;   // Total orders placed
         std::size_t cancelled_count; // Total orders cancelled
         std::size_t filled_count;    // Total orders filled
-        std::size_t open_count;      // Current open orders
+        std::size_t edited_count;   // Total orders edited (qty)
+        std::size_t replaced_count; // Total orders replaced (price+qty)
+        std::size_t open_count;     // Current open orders
         Quantity bid_depth[DEPTH_K];  // Top K bid levels
         Quantity ask_depth[DEPTH_K];  // Top K ask levels
         std::uint8_t bid_levels;
@@ -267,11 +273,10 @@ namespace engine
 
         MarketSnapshot() noexcept
             : best_bid(-1), best_ask(-1), market_price(-1),
-              bid_levels(0), ask_levels(0),
-              auto_match(false),
-              placed_count(0), cancelled_count(0), filled_count(0), open_count(0)
+              placed_count(0), cancelled_count(0), filled_count(0), edited_count(0), replaced_count(0), open_count(0),
+              bid_levels(0), ask_levels(0), auto_match(false)
         {
-            for (int i = 0; i < DEPTH_K; ++i) 
+            for (std::size_t i = 0; i < DEPTH_K; ++i) 
             {
                 bid_depth[i] = 0;
                 ask_depth[i] = 0;

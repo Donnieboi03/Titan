@@ -93,7 +93,7 @@ Step 3 compiles the C++ core and creates the `titan` Python package. No separate
 
 ```bash
 python -c "import titan; print(titan.__version__)"
-# Expected: 1.1.0
+# Expected: 1.2.0
 ```
 
 **🐳 Docker (alternative)**
@@ -139,7 +139,7 @@ import titan
 
 # Initialize runtime (singleton: 8 workers, 4M order capacity)
 titan.EngineRuntime.reset_instance()
-runtime = titan.EngineRuntime.get_instance(num_threads=8, capacity=4 * 1024 * 1024)
+runtime = titan.EngineRuntime.get_instance(num_threads=8, max_capacity=4 * 1024 * 1024)
 
 # Register a stock
 runtime.register_stock("AAPL", 150.0, 1_000_000.0)
@@ -165,6 +165,7 @@ See `python/tests/test_bindings.py` for more usage and `docs/` for full API and 
 - **EngineRuntime**:
   - Manages many `OrderEngine` instances across worker threads.
   - Batching and job scheduling for high throughput.
+  - For large numbers of stocks or strategies, pass `max_engine_count` and `max_strategies` to `get_instance()` so reserved capacity keeps returned `UserView*` pointers valid.
 
 Representative performance (depends on hardware and config):
 

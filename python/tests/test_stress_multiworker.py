@@ -61,7 +61,7 @@ def python_spinner(stop_evt: threading.Event, counter: list):
 # Test starts here
 print("1) Creating runtime and registering tickers...")
 tc.EngineRuntime.reset_instance()
-runtime = tc.EngineRuntime.get_instance(num_threads=NUM_WORKERS, capacity=CAPACITY, verbose=False, quantum=1000)
+runtime = tc.EngineRuntime.get_instance(num_threads=NUM_WORKERS, max_capacity=CAPACITY, verbose=False, quantum=1000)
 runtime.set_batch_size(BATCH_SIZE)
 
 ok = True
@@ -96,7 +96,7 @@ start = time.time()
 for th in threads:
     th.join()
 
-# Signal processor to finish after draining
+# Signal processor to finish after processing
 runtime.process_pending_orders_async()
 while not runtime.all_jobs_completed():
     time.sleep(0.001)

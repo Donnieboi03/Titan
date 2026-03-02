@@ -116,64 +116,115 @@ class SimulationMetrics:
     simulation_time_seconds: float
     """Wall time of the C++ simulation loop (seconds)."""
     orders_per_second: float
+    """Computed: (placed + cancelled + edited + replaced) / simulation_time_seconds."""
     updates_per_second: float
+    """Computed: market_updates_processed / simulation_time_seconds."""
     peak_open_orders: int
     final_open_orders: int
-    average_utilization_percent: float
     initial_price: float
     """First sampled price from the data file (used for IPO)."""
     final_price: float
-    unique_price_levels: int
     cache_entries: int
+    """Distinct (side, price) levels in the simulate cache; use for book breadth."""
     simulation_running: bool
     """True while the async simulation job is still executing."""
 
 
 # ---------------------------------------------------------------------------
-# User
+# UserSnapshot (read-only state copy; see UserView.get_snapshot)
 # ---------------------------------------------------------------------------
 
-class User:
+class UserSnapshot:
     """
-    Trading user / agent handle.
+    Read-only snapshot of user state (capital, position for strategy ticker, etc.).
+    Returned by ``UserView.get_snapshot()``. Single-ticker: each strategy is tied to one ticker.
+    """
+    user_id: int
+    capital: float
+    realized_pnl: float
+    total_volume: float
+    ticker: str
+    """Strategy's ticker."""
+    position: float
+    """Net position in shares (positive = long, negative = short)."""
+    avg_price: float
+    unrealized_pnl: float
+
+
+# ---------------------------------------------------------------------------
+# UserView (observational handle returned by register_strategy)
+# ---------------------------------------------------------------------------
+
+class UserView:
+    """
+    Observational handle returned by ``EngineRuntime.register_strategy()``.
     
-    Obtained from ``EngineRuntime.register_strategy()``.
-    All order methods are synchronous when called from within a strategy
-    callback (the C++ engine processes them immediately before returning).
+    Does **not** expose order submission (submit_limit_order, etc.). Use
+    ``runtime.submit_limit_order(ticker, side, price, qty, user_id=view.get_user_id())``
+    and similar for orders from the main thread. For positions/order IDs use
+    ``runtime.get_positions(view.get_user_id(), ticker)`` and
+    ``runtime.get_active_orders(view.get_user_id(), ticker)``.
+    """
+    def get_snapshot(self) -> UserSnapshot:
+        """Return a copy of the latest user state (updated each quantum)."""
+        ...
+    def get_capital(self) -> float: ...
+    def get_realized_pnl(self) -> float: ...
+    def get_total_volume(self) -> float: ...
+    def get_user_id(self) -> int: ...
+    def get_ticker(self) -> str: ...
+    def get_position(self) -> float: ...
+    def get_all_positions(self) -> Dict[str, float]: ...
+    def get_committed_sell_qty(self) -> float: ...
+    def get_unrealized_pnl(self) -> float: ...
+
+
+# ---------------------------------------------------------------------------
+# User (full handle passed to strategy callback; extends UserView)
+# ---------------------------------------------------------------------------
+
+class User(UserView):
+    """
+    Full trading user handle passed **inside** the strategy callback.
+
+    The strategy is bound to a single ticker at registration. All methods
+    below operate on that ticker only; no ticker argument is required.
+    The value returned by ``register_strategy()`` is a ``UserView`` (observational only).
     """
 
-    # --- Order submission ---
+    # --- Order submission (strategy's ticker) ---
     def submit_limit_order(
-        self, ticker: str, side: Union[str, OrderSide], price: float, quantity: float
+        self, side: Union[str, OrderSide], price: float, quantity: float
     ) -> int:
         """Place a limit order. Returns order_id or INVALID_ORDER_ID on failure."""
         ...
-    def submit_market_order(
-        self, ticker: str, side: Union[str, OrderSide], quantity: float
-    ) -> int:
+    def submit_market_order(self, side: Union[str, OrderSide], quantity: float) -> int:
         """Place a market order. Returns order_id or INVALID_ORDER_ID on failure."""
         ...
-    def submit_cancel_order(self, ticker: str, order_id: int) -> bool:
+    def submit_cancel_order(self, order_id: int) -> bool:
         """Cancel an existing order. Returns True if accepted, False on failure."""
         ...
-    def submit_edit_order(
-        self, ticker: str, order_id: int, new_price: float, new_quantity: float
+    def submit_replace_order(
+        self, order_id: int, new_price: float, new_quantity: float
     ) -> bool:
-        """Edit price and/or quantity of an open order. Returns True if accepted, False on failure."""
+        """Replace an open order (new price and/or quantity). Returns True if accepted, False on failure."""
+        ...
+    def submit_edit_order(self, order_id: int, new_quantity: float) -> bool:
+        """Edit quantity only of an open order (same price). Returns True if accepted, False on failure."""
         ...
 
-    # --- Market data ---
-    def get_best_bid(self, ticker: str) -> float:
+    # --- Market data (strategy's ticker) ---
+    def get_best_bid(self) -> float:
         """Return current best bid price in dollars, or -1 if no bids."""
         ...
-    def get_best_ask(self, ticker: str) -> float:
+    def get_best_ask(self) -> float:
         """Return current best ask price in dollars, or -1 if no asks."""
         ...
-    def get_market_price(self, ticker: str) -> float:
+    def get_market_price(self) -> float:
         """Return last trade execution price in dollars."""
         ...
     def get_market_depth(
-        self, ticker: str, side: Union[str, OrderSide], depth: int = 10
+        self, side: Union[str, OrderSide], depth: int = 10
     ) -> List[Tuple[float, float]]:
         """Return top-N price levels as list of (price_dollars, qty) tuples."""
         ...
@@ -181,24 +232,24 @@ class User:
         """Return all registered ticker symbols."""
         ...
 
-    # --- Positions & orders ---
-    def get_positions(self, ticker: str) -> List[int]:
+    # --- Positions & orders (strategy's ticker) ---
+    def get_positions(self) -> List[int]:
         """Return all order IDs ever placed (including freed slots). Prefer get_active_orders()."""
         ...
-    def get_active_orders(self, ticker: str) -> List[int]:
+    def get_active_orders(self) -> List[int]:
         """Return IDs of currently open (unfilled, uncancelled) orders."""
         ...
-    def get_position(self, ticker: str) -> float:
-        """Return net position in shares/BTC (positive = long, negative = short)."""
+    def get_position(self) -> float:
+        """Return net position in shares (positive = long, negative = short) for strategy ticker."""
         ...
     def get_all_positions(self) -> Dict[str, float]:
-        """Return net positions for all tickers as {ticker: qty}."""
+        """Return {ticker: position} (single entry for strategy ticker)."""
         ...
-    def get_order_info(self, ticker: str, order_id: int) -> Optional[OrderInfo]:
+    def get_order_info(self, order_id: int) -> Optional[OrderInfo]:
         """Return a copy of the order snapshot, or None if not found / already freed. Safe to hold."""
         ...
-    def has_sufficient_shares(self, ticker: str, qty: float) -> bool:
-        """Return True if user holds at least qty shares of ticker (for sell validation)."""
+    def has_sufficient_shares(self, qty: float) -> bool:
+        """Return True if user holds at least qty shares (for sell validation)."""
         ...
 
     # --- Account ---
@@ -211,8 +262,8 @@ class User:
     def get_realized_pnl(self) -> float:
         """Return cumulative realized profit/loss in dollars."""
         ...
-    def get_unrealized_pnl(self, ticker: str, current_price: float) -> float:
-        """Return unrealized PnL in dollars at the given current price."""
+    def get_unrealized_pnl(self) -> float:
+        """Return unrealized PnL in dollars (from snapshot, strategy ticker)."""
         ...
     def get_total_volume(self) -> float:
         """Return total traded volume (sum of all fill quantities)."""
@@ -236,18 +287,22 @@ class EngineRuntime:
     @staticmethod
     def get_instance(
         num_threads: int = 1,
-        capacity: int = 1048576,
         verbose: bool = False,
         quantum: int = 1000,
+        max_capacity: int = 1048576,
+        max_engine_count: int = 100,
+        max_strategies: int = 1000,
     ) -> EngineRuntime:
         """
         Return (or create) the singleton EngineRuntime.
 
         Args:
             num_threads: Number of C++ worker threads.
-            capacity: Default order pool capacity per engine (max concurrent open orders).
             verbose: Enable notification system (order accept/fill/cancel messages).
             quantum: Number of orders processed between strategy callbacks / snapshot updates.
+            max_capacity: Max order pool size per engine (max concurrent open orders).
+            max_engine_count: Reserve space for this many stocks/engines (avoids realloc).
+            max_strategies: Reserve space for this many strategies (keeps UserView* from register_strategy valid).
         """
         ...
 
@@ -290,7 +345,6 @@ class EngineRuntime:
         side: Union[str, OrderSide],
         price: float,
         qty: float,
-        user_id: int = ...,
     ) -> int:
         """Submit a limit order asynchronously. Returns INVALID_ORDER_ID (order ID not yet assigned)."""
         ...
@@ -300,7 +354,6 @@ class EngineRuntime:
         ticker: str,
         side: Union[str, OrderSide],
         qty: float,
-        user_id: int = ...,
     ) -> int:
         """Submit a market order asynchronously. Returns INVALID_ORDER_ID."""
         ...
@@ -309,20 +362,26 @@ class EngineRuntime:
         self,
         ticker: str,
         order_id: int,
-        user_id: int = ...,
     ) -> bool:
         """Cancel an order asynchronously. Returns True if accepted into the queue, False on failure."""
         ...
 
-    def submit_edit_order(
+    def submit_replace_order(
         self,
         ticker: str,
         order_id: int,
         new_price: float,
         new_qty: float,
-        user_id: int = ...,
     ) -> bool:
-        """Edit an order asynchronously. Returns True if accepted into the queue, False on failure."""
+        """Replace an order (new price and/or qty) asynchronously. Returns True if accepted, False on failure."""
+        ...
+    def submit_edit_order(
+        self,
+        ticker: str,
+        order_id: int,
+        new_qty: float,
+    ) -> bool:
+        """Edit order quantity only asynchronously. Returns True if accepted, False on failure."""
         ...
 
     # --- Market data queries ---
@@ -407,6 +466,7 @@ class EngineRuntime:
     ) -> bool:
         """
         Start an async simulation by streaming a data file through the C++ engine.
+        Orders are matched as the L2 stream is applied.
 
         Internally registers the stock (samples initial price from data), then
         dispatches a simulation job to a worker thread. Poll
@@ -433,10 +493,13 @@ class EngineRuntime:
 
     # --- Control ---
     def set_auto_match(self, ticker: str, auto_match: bool) -> bool:
-        """Enable or disable automatic order matching for ticker."""
+        """
+        Enable or disable automatic order matching for ticker.
+        Advanced. When disabled, orders are queued until matching is turned back on.
+        """
         ...
     def get_auto_match(self, ticker: str) -> bool:
-        """Return current auto-match setting for ticker."""
+        """Return current auto-match setting for ticker. Advanced use."""
         ...
     def set_batch_size(self, batch_size: int) -> None:
         """Set the flush threshold: number of queued orders before auto-submit to scheduler."""
@@ -500,14 +563,8 @@ class EngineRuntime:
     def get_capacity(self, ticker: str) -> int:
         """Return order pool capacity (max concurrent open orders) for ticker."""
         ...
-    def get_utilization(self, ticker: str) -> int:
-        """Return current number of allocated order slots for ticker."""
-        ...
     def get_pending_count(self, ticker: str) -> int:
         """Return number of orders queued but not yet processed for ticker."""
-        ...
-    def order_exists(self, ticker: str, order_id: int) -> bool:
-        """Return True if the order currently exists and is open in the engine."""
         ...
 
     # --- Strategy management ---
@@ -516,7 +573,7 @@ class EngineRuntime:
         ticker: str,
         strategy: Callable[[User], None],
         starting_capital: float = 100000.0,
-    ) -> User:
+    ) -> Optional[UserView]:
         """
         Register a Python strategy function as a trading agent for the given ticker.
 
@@ -529,15 +586,17 @@ class EngineRuntime:
             ticker: Stock ticker this strategy is registered for (must already be
                 registered via register_stock). The strategy callback runs when
                 this ticker's per-engine quantum is reached.
-            strategy: Callable receiving a ``User`` handle. Example::
+            strategy: Callable receiving a ``User`` handle (full API; methods use the registered ticker). Example::
 
                 def my_strategy(user: titan.User) -> None:
-                    bid = user.get_best_bid("BTCUSDT")
-                    user.submit_limit_order("BTCUSDT", "BID", bid - 1, 0.001)
+                    bid = user.get_best_bid()
+                    user.submit_limit_order("BID", bid - 1, 0.001)
 
             starting_capital: Initial cash balance in dollars.
         Returns:
-            User handle for inspecting positions and PnL, or None if ticker not found.
+            UserView handle for inspecting positions and PnL via get_snapshot() / get_capital() etc.,
+            or None if ticker not found. To submit orders from the main thread use
+            runtime.submit_limit_order(..., user_id=view.get_user_id()).
         """
         ...
 

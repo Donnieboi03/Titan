@@ -55,7 +55,7 @@ To install without editable mode (fixed install): `pip install .`
 python -c "import titan; print(titan.__version__)"
 ```
 
-You should see `1.1.0` (or the current version).
+You should see `1.2.0` (or the current version).
 
 ### One-liner (from repo root)
 

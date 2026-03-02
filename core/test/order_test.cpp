@@ -218,7 +218,7 @@ void test_cancel_order()
 
 void test_edit_order()
 {
-    std::cout << "=== Testing Edit Order ===\n";
+    std::cout << "=== Testing Replace Order and Edit Order (qty-only) ===\n";
     
     engine::OrderEngine engine(10000, VERBOSE);
     
@@ -231,26 +231,73 @@ void test_edit_order()
     assert(initial->price_ == price(150.0) && "Initial price should be 150.0");
     assert(initial->qty_ == 10 && "Initial quantity should be 10");
     
-    // Edit order (change price and quantity)
-    bool edit_result = engine.edit_order(bid1, engine::OrderSide::BID, price(149.0), 20);
-    assert(edit_result && "Edit should succeed");
+    // Replace order (change price and quantity)
+    bool replace_result = engine.replace_order(bid1, engine::OrderSide::BID, price(149.0), 20);
+    assert(replace_result && "Replace should succeed");
     
     // Verify order was modified (not cancelled)
-    const engine::OrderInfo* edited_order = engine.get_order(bid1);
-    assert(edited_order != nullptr && "Edited order should exist");
-    assert(edited_order->status_ == engine::OrderStatus::OPEN && "Edited order should still be OPEN");
-    assert(edited_order->price_ == price(149.0) && "New price should be 149.0");
-    assert(edited_order->qty_ == 20 && "New quantity should be 20");
+    const engine::OrderInfo* replaced_order = engine.get_order(bid1);
+    assert(replaced_order != nullptr && "Replaced order should exist");
+    assert(replaced_order->status_ == engine::OrderStatus::OPEN && "Replaced order should still be OPEN");
+    assert(replaced_order->price_ == price(149.0) && "New price should be 149.0");
+    assert(replaced_order->qty_ == 20 && "New quantity should be 20");
     
     // Verify best bid changed
     engine.update_snapshot();
-    assert(engine.get_snapshot().best_bid == price(149.0) && "Best bid should reflect edited order");
+    assert(engine.get_snapshot().best_bid == price(149.0) && "Best bid should reflect replaced order");
     
-    // Try to edit non-existent order
-    bool edit_fail = engine.edit_order(99999, engine::OrderSide::BID, price(150.0), 10);
-    assert(!edit_fail && "Edit should fail for non-existent order");
+    // Edit order (qty-only): same price, change quantity only
+    bool edit_result = engine.edit_order(bid1, 15);
+    assert(edit_result && "Edit (qty-only) should succeed");
+    const engine::OrderInfo* edited_order = engine.get_order(bid1);
+    assert(edited_order != nullptr && "Edited order should exist");
+    assert(edited_order->price_ == price(149.0) && "Price unchanged after qty-only edit");
+    assert(edited_order->qty_ == 15 && "Quantity should be 15 after edit");
     
-    std::cout << "✓ Edit Order test PASSED!\n\n";
+    // Try to replace non-existent order
+    bool replace_fail = engine.replace_order(99999, engine::OrderSide::BID, price(150.0), 10);
+    assert(!replace_fail && "Replace should fail for non-existent order");
+    
+    std::cout << "✓ Replace Order and Edit Order (qty-only) test PASSED!\n\n";
+}
+
+void test_place_cancel_edit_replace_throughput()
+{
+    std::cout << "=== Throughput: place, cancel, edit (qty-only), replace ===\n";
+    const std::size_t N = 500000;
+    engine::OrderEngine engine(N * 2, false, true);
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    std::vector<engine::OrderId> ids;
+    ids.reserve(N);
+    for (std::size_t i = 0; i < N; ++i)
+        ids.push_back(engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, price(100.0 + i * 0.01), 10));
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double place_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    std::cout << " Place: " << N << " in " << place_ms << " ms (" << (N / (place_ms / 1000.0)) << " ops/sec)\n";
+
+    t0 = std::chrono::high_resolution_clock::now();
+    for (std::size_t i = 0; i < N / 2; ++i)
+        engine.replace_order(ids[i], engine::OrderSide::BID, price(101.0), 20);
+    t1 = std::chrono::high_resolution_clock::now();
+    double replace_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    std::cout << " Replace: " << (N/2) << " in " << replace_ms << " ms (" << ((N/2) / (replace_ms / 1000.0)) << " ops/sec)\n";
+
+    t0 = std::chrono::high_resolution_clock::now();
+    for (std::size_t i = N / 2; i < N; ++i)
+        engine.edit_order(ids[i], 15);
+    t1 = std::chrono::high_resolution_clock::now();
+    double edit_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    std::cout << " Edit (qty-only): " << (N - N/2) << " in " << edit_ms << " ms (" << ((N - N/2) / (edit_ms / 1000.0)) << " ops/sec)\n";
+
+    t0 = std::chrono::high_resolution_clock::now();
+    for (std::size_t i = 0; i < N; ++i)
+        engine.cancel_order(ids[i]);
+    t1 = std::chrono::high_resolution_clock::now();
+    double cancel_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    std::cout << " Cancel: " << N << " in " << cancel_ms << " ms (" << (N / (cancel_ms / 1000.0)) << " ops/sec)\n";
+
+    std::cout << "✓ Place/Cancel/Edit/Replace throughput test completed\n\n";
 }
 
 void test_multiple_orders_same_price()
@@ -307,6 +354,48 @@ void test_order_priority()
     assert(o2->time_ <= o3->time_ && "Order 2 time should be <= Order 3 time");
     
     std::cout << "✓ Order Priority test PASSED!\n\n";
+}
+
+// Delta L2 semantics: increase = place at back, decrease = remove from back (get_back_order_at_level).
+void test_delta_l2_back_of_queue()
+{
+    std::cout << "=== Testing Delta L2: Back of Queue (get_back_order_at_level) ===\n";
+
+    engine::OrderEngine engine(10000, VERBOSE);
+    const engine::Price p = price(100.0);
+
+    // New level: place first order (10)
+    auto id1 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, p, 10);
+    assert(id1 != engine::INVALID_ORDER_ID);
+    engine.update_snapshot();
+    assert(engine.get_snapshot().bid_depth[0] == 10);
+
+    // Back at level should be the only order
+    engine::OrderId back_id = engine.get_back_order_at_level(engine::OrderSide::BID, p);
+    assert(back_id == id1 && "Back order at level should be first order when only one");
+
+    // Increase: place second order at same price (20) -> goes to back
+    auto id2 = engine.place_order(engine::OrderSide::BID, engine::OrderType::LIMIT, p, 20);
+    assert(id2 != engine::INVALID_ORDER_ID);
+    back_id = engine.get_back_order_at_level(engine::OrderSide::BID, p);
+    assert(back_id == id2 && "Back order should be the newly placed order (new size at back)");
+    engine.update_snapshot();
+    assert(engine.get_snapshot().bid_depth[0] == 30 && "Depth = 10 + 20");
+
+    // Decrease from back: cancel back order (20), depth should become 10
+    engine.cancel_order(back_id);
+    engine.update_snapshot();
+    assert(engine.get_snapshot().bid_depth[0] == 10 && "After removing back order, depth = 10");
+    back_id = engine.get_back_order_at_level(engine::OrderSide::BID, p);
+    assert(back_id == id1 && "Back order should now be the first order");
+
+    // Level to zero: cancel remaining order
+    engine.cancel_order(back_id);
+    engine.update_snapshot();
+    assert(engine.get_snapshot().bid_levels == 0 || engine.get_snapshot().bid_depth[0] == 0);
+    assert(engine.get_back_order_at_level(engine::OrderSide::BID, p) == engine::INVALID_ORDER_ID);
+
+    std::cout << "✓ Delta L2 back-of-queue test PASSED!\n\n";
 }
 
 void test_stress_orders()
@@ -394,7 +483,7 @@ void test_stress_orders()
         for (std::size_t i = order_ids.size() / 2; i < order_ids.size(); ++i)
         {
             engine::Price new_price = 9900 + (i % 50);
-            if (engine.edit_order(order_ids[i], engine::OrderSide::BID, new_price, 20))
+            if (engine.replace_order(order_ids[i], engine::OrderSide::BID, new_price, 20))
                 edited++;
         }
         end = std::chrono::high_resolution_clock::now();
@@ -481,7 +570,7 @@ void test_slot_reuse()
     
     // Phase 5: Try to edit/cancel with old IDs - should fail
     std::cout << "Phase 5: Testing edit/cancel with freed OrderIds...\n";
-    bool edit_result = engine.edit_order(filled_bids[0], engine::OrderSide::BID, price(105.0), 20);
+    bool edit_result = engine.replace_order(filled_bids[0], engine::OrderSide::BID, price(105.0), 20);
     bool cancel_result = engine.cancel_order(filled_asks[0]);
     std::cout << "  Edit with freed ID: " << (edit_result ? "SUCCEEDED (BAD!)" : "rejected (good)") << "\n";
     std::cout << "  Cancel with freed ID: " << (cancel_result ? "SUCCEEDED (BAD!)" : "rejected (good)") << "\n";
@@ -944,8 +1033,10 @@ int main(int argc, char* argv[])
     test_place_market_order();
     test_cancel_order();
     test_edit_order();
+    test_place_cancel_edit_replace_throughput();
     test_multiple_orders_same_price();
     test_order_priority();
+    test_delta_l2_back_of_queue();
     test_order_matching_correctness();
     test_slot_reuse();
     test_accumulate_drain_throughput();

@@ -12,7 +12,7 @@ namespace scheduler
         InvokeFn invoke;
         uint32_t owner_id;
 
-        Job() : owner_id(0), invoke(nullptr) {}
+        Job() : invoke(nullptr), owner_id(0) {}
 
         // Move-only
         Job(Job&&) = default;
@@ -106,7 +106,7 @@ namespace scheduler
 
     
     inline JobScheduler::JobScheduler(std::size_t num_workers, std::size_t batch_capacity)
-    : num_workers_(num_workers), batch_capacity_(batch_capacity)
+    : batch_capacity_(batch_capacity), num_workers_(num_workers)
     {
         
         // allocate finished flags at runtime

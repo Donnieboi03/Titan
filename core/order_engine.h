@@ -26,8 +26,10 @@ namespace engine
         OrderId place_order(OrderSide side, OrderType type, Price price, Quantity qty, std::vector<EngineMsg>& msgs, bool collect_accept, const std::function<bool(OrderId)>* fill_filter) noexcept;
         bool cancel_order(OrderId id, EngineMsg& msg) noexcept;
         bool cancel_order(OrderId id) noexcept;
-        bool edit_order(OrderId id, OrderSide side, Price price, Quantity qty, std::vector<EngineMsg>& msgs) noexcept;
-        bool edit_order(OrderId id, OrderSide side, Price price, Quantity qty) noexcept;
+        bool replace_order(OrderId id, OrderSide side, Price price, Quantity qty, std::vector<EngineMsg>& msgs) noexcept;
+        bool replace_order(OrderId id, OrderSide side, Price price, Quantity qty) noexcept;
+        bool edit_order(OrderId id, Quantity new_qty) noexcept;
+        bool edit_order(OrderId id, Quantity new_qty, std::vector<EngineMsg>& msgs) noexcept;
 
         // Auto-match control
         void set_auto_match(bool auto_match) noexcept;
@@ -40,6 +42,9 @@ namespace engine
 
         // Order lookup (returns nullptr if invalid/freed)
         const OrderInfo* get_order(OrderId id) const noexcept;
+
+        // Back order at price level (for L2 delta sim: remove from back). Returns INVALID_ORDER_ID if level missing/empty.
+        OrderId get_back_order_at_level(OrderSide side, Price price) const noexcept;
 
     private:
         // OrderId encoding helpers
@@ -62,7 +67,8 @@ namespace engine
         // Private implementation methods
         OrderId place_order_impl(OrderSide side, OrderType type, Price price, Quantity qty, std::vector<EngineMsg>* msgs, bool collect_accept = true, const std::function<bool(OrderId)>* fill_filter = nullptr) noexcept;
         bool cancel_order_impl(OrderId id, EngineMsg* msg) noexcept;
-        bool edit_order_impl(OrderId id, OrderSide side, Price price, Quantity qty, std::vector<EngineMsg>* msgs) noexcept;
+        bool replace_order_impl(OrderId id, OrderSide side, Price price, Quantity qty, std::vector<EngineMsg>* msgs) noexcept;
+        bool edit_order_qty_impl(OrderId id, Quantity new_qty, std::vector<EngineMsg>* msgs) noexcept;
         void update_snapshot_impl() noexcept;
 
         // Member variables
@@ -86,6 +92,8 @@ namespace engine
         alignas(engine::CACHE_LINE) std::size_t placed_count_;
         std::size_t cancelled_count_;
         std::size_t filled_count_;
+        std::size_t edited_count_;
+        std::size_t replaced_count_;
         Price last_trade_price_;
         
         std::uint16_t engine_id_;
@@ -110,11 +118,11 @@ namespace engine
             const bool new_level = (level_it == bid_levels_.end());
             if (new_level)
             {
-                bid_book_.emplace(price);
+                bid_book_.insert(price);
                 level_it = bid_levels_.emplace(price, OrderLevel()).first;
                 bid_depth_cache_[price] = 0;
                 
-                if (top_bid_heap_.size() < DEPTH_K)
+                if (top_bid_heap_.size() < static_cast<int>(DEPTH_K))
                 {
                     top_bid_heap_.emplace(price);
                 }
@@ -146,11 +154,11 @@ namespace engine
             const bool new_level = (level_it == ask_levels_.end());
             if (new_level)
             {
-                ask_book_.emplace(price);
+                ask_book_.insert(price);
                 level_it = ask_levels_.emplace(price, OrderLevel()).first;
                 ask_depth_cache_[price] = 0;
                 
-                if (top_ask_heap_.size() < DEPTH_K)
+                if (top_ask_heap_.size() < static_cast<int>(DEPTH_K))
                 {
                     top_ask_heap_.emplace(price);
                 }
@@ -198,8 +206,7 @@ namespace engine
         {
             if (side == OrderSide::BID)
             {
-                const auto idx = bid_book_.find(price);
-                if (idx != -1) bid_book_.pop(idx);
+                bid_book_.erase(price);
                 bid_levels_.erase(price);
                 bid_depth_cache_.erase(price);
                 
@@ -211,8 +218,7 @@ namespace engine
             }
             else
             {
-                const auto idx = ask_book_.find(price);
-                if (idx != -1) ask_book_.pop(idx);
+                ask_book_.erase(price);
                 ask_levels_.erase(price);
                 ask_depth_cache_.erase(price);
                 
@@ -240,24 +246,17 @@ namespace engine
             if (recent->qty_ == 0) break;
 
             if (ask_book_.empty() || bid_book_.empty()) break;
-            const Price best_ask_price = ask_book_.peek();
-            const Price best_bid_price = bid_book_.peek();
+            const Price best_ask_price = *ask_book_.begin();
+            const Price best_bid_price = *bid_book_.rbegin();
 
             if (recent->type_ == OrderType::MARKET)
             {
                 const Price new_price = (recent->side_ == OrderSide::ASK) ? best_bid_price : best_ask_price;
                 if (new_price != recent->price_)
                 {
-                    if (recent->in_book_)
-                    {
-                        pop_from_book(recent->side_, recent->price_, recent->time_, recent_internal_id);
-                        recent->price_ = new_price;
-                        push_into_book(recent->side_, recent->price_, recent->time_, recent_internal_id);
-                    }
-                    else
-                    {
-                        recent->price_ = new_price;
-                    }
+                    pop_from_book(recent->side_, recent->price_, recent->time_, recent_internal_id);
+                    recent->price_ = new_price;
+                    push_into_book(recent->side_, recent->price_, recent->time_, recent_internal_id);
                 }
             }
 
@@ -302,9 +301,10 @@ namespace engine
             best_ask_level.pop();
             if (best_ask_level.empty())
             {
-                ask_book_.pop();
+                ask_book_.erase(best_ask.price_);
                 ask_levels_.erase(best_ask.price_);
-                top_ask_heap_.pop();
+                int top_idx = top_ask_heap_.find(best_ask.price_);
+                if (top_idx != -1) top_ask_heap_.pop(top_idx);
                 ask_depth_cache_.erase(best_ask.price_);
             }
 
@@ -331,9 +331,10 @@ namespace engine
             best_bid_level.pop();
             if (best_bid_level.empty())
             {
-                bid_book_.pop();
+                bid_book_.erase(best_bid.price_);
                 bid_levels_.erase(best_bid.price_);
-                top_bid_heap_.pop();
+                int top_idx = top_bid_heap_.find(best_bid.price_);
+                if (top_idx != -1) top_bid_heap_.pop(top_idx);
                 bid_depth_cache_.erase(best_bid.price_);
             }
 

@@ -67,7 +67,7 @@ except FileNotFoundError:
 
 setup(
     name="titan-backtesting",
-    version="1.1.0",
+    version="1.2.0",
     author="https://github.com/Donnieboi03",
     description="Multi-agent market microstructure backtesting library",
     long_description=long_description,

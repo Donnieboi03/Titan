@@ -18,17 +18,20 @@ Titan uses a **singleton** runtime. Get the instance (and optionally reset it fi
 titan.EngineRuntime.reset_instance()
 runtime = titan.EngineRuntime.get_instance(
     num_threads=4,
-    capacity=1024 * 1024,
-    verbose=False
+    verbose=False,
+    quantum=1000,
+    max_capacity=1024 * 1024
 )
 ```
 
 **Parameters:**
 
 - `num_threads`: Number of worker threads (default: 1)
-- `capacity`: Maximum orders per order book (default: 1M)
 - `verbose`: Enable debug logging (default: False). Set to `True` if you want order accept/fill/cancel messages.
 - `quantum`: Scheduling quantum (default: 1000)
+- `max_capacity`: Max order pool size per engine (default: 1M)
+- `max_engine_count`: Reserve space for this many stocks/engines (default: 100). Use when registering many tickers.
+- `max_strategies`: Reserve space for this many strategies (default: 1000). Use when registering many strategies so returned `UserView*` pointers stay valid.
 
 **Order notifications:** To see accept/fill/cancel messages on the console, use `verbose=True` and call `runtime.set_notify_order(True)`. No strategy registration is required.
 
@@ -57,7 +60,8 @@ Order APIs:
 - `submit_limit_order(ticker, side, price, qty, user_id=...)` – limit order
 - `submit_market_order(ticker, side, qty, user_id=...)` – market order
 - `submit_cancel_order(ticker, order_id, user_id=...)` – cancel order
-- `submit_edit_order(ticker, order_id, new_price, new_qty, user_id=...)` – modify order
+- `submit_replace_order(ticker, order_id, new_price, new_qty, user_id=...)` – full replace (price and/or qty)
+- `submit_edit_order(ticker, order_id, new_qty, user_id=...)` – edit quantity only (same price)
 
 Use `"BID"` or `"ASK"` for `side`.
 
@@ -93,7 +97,7 @@ import titan
 
 def main():
     titan.EngineRuntime.reset_instance()
-    runtime = titan.EngineRuntime.get_instance(num_threads=4, capacity=1024 * 1024)
+    runtime = titan.EngineRuntime.get_instance(num_threads=4, max_capacity=1024 * 1024)
 
     runtime.register_stock("AAPL", 150.0, 1_000_000.0)
 
@@ -119,19 +123,18 @@ You can register a **callable** that receives a `User` handle; the engine invoke
 
 ```python
 def my_strategy(user):
-    """Called by the engine every quantum; user is a titan.User handle."""
-    for ticker in user.list_tickers():
-        bid = user.get_best_bid(ticker)
-        ask = user.get_best_ask(ticker)
-        if bid > 0 and ask > 0:
-            mid = (bid + ask) / 2.0
-            user.submit_limit_order(ticker, "BID", mid - 1.0, 10.0)
-            user.submit_limit_order(ticker, "ASK", mid + 1.0, 10.0)
+    """Called by the engine every quantum; user is a titan.User handle (bound to one ticker)."""
+    bid = user.get_best_bid()
+    ask = user.get_best_ask()
+    if bid > 0 and ask > 0:
+        mid = (bid + ask) / 2.0
+        user.submit_limit_order("BID", mid - 1.0, 10.0)
+        user.submit_limit_order("ASK", mid + 1.0, 10.0)
 ```
 
 ### Step 2: Register the strategy
 
-Register the strategy for a ticker (e.g. "AAPL"). The strategy is bound to that ticker and runs every **quantum** (every N orders on that ticker), in sync with snapshot updates and L2 recording.
+Register the strategy for a ticker (e.g. "AAPL"). The strategy is bound to that ticker and runs every **quantum** (every N orders on that ticker), in sync with snapshot updates and L2 recording. The return value is a **UserView** (observational only); use it to read capital and positions. To submit orders from the main thread, use `runtime.submit_limit_order(..., user_id=trader.get_user_id())`.
 
 ```python
 trader = runtime.register_strategy("AAPL", my_strategy, starting_capital=50_000.0)
@@ -150,10 +153,15 @@ runtime.process_pending_orders()
 
 ```python
 capital = trader.get_capital()
-position = trader.get_position("AAPL")
-active = trader.get_active_orders("AAPL")
+position = trader.get_position()
+active = runtime.get_active_orders(trader.get_user_id(), "AAPL")
 print(f"Capital: ${capital:.2f}, Position: {position:.2f}, Active orders: {len(active)}")
+# Optional: full snapshot
+snap = trader.get_snapshot()
+print(f"Snapshot: capital=${snap.capital:.2f}, ticker={snap.ticker}, position={snap.position}")
 ```
+
+Use the **UserView** handle for snapshot data; for order IDs use `runtime.get_active_orders(view.get_user_id(), ticker)` and `runtime.get_positions(view.get_user_id(), ticker)`.
 
 See `python/tests/test_bindings.py` for more.
 
@@ -161,7 +169,7 @@ See `python/tests/test_bindings.py` for more.
 
 ```python
 titan.EngineRuntime.reset_instance()
-runtime = titan.EngineRuntime.get_instance(num_threads=4, capacity=1024 * 1024)
+runtime = titan.EngineRuntime.get_instance(num_threads=4, max_capacity=1024 * 1024)
 
 for ticker, price in [("AAPL", 150.0), ("MSFT", 300.0), ("GOOGL", 2800.0)]:
     runtime.register_stock(ticker, price, 1_000_000.0)
@@ -218,8 +226,11 @@ runtime.process_pending_orders()
 ```python
 order_id = runtime.submit_limit_order("AAPL", "BID", 149.50, 100.0)
 runtime.process_pending_orders()
-# Later:
-runtime.submit_edit_order("AAPL", order_id, 149.75, 100.0)
+# Later (change price and/or qty):
+runtime.submit_replace_order("AAPL", order_id, 149.75, 100.0)
+runtime.process_pending_orders()
+# Or quantity only (same price):
+runtime.submit_edit_order("AAPL", order_id, 80.0)
 runtime.process_pending_orders()
 ```
 
