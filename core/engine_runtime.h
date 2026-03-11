@@ -25,10 +25,9 @@ namespace backtest
             bool submit_cancel_order(const std::string& ticker, engine::OrderId order_id, user::UserId user_id);
             bool submit_replace_order(const std::string& ticker, engine::OrderId order_id, double new_price, double new_qty, user::UserId user_id);
             bool submit_edit_order(const std::string& ticker, engine::OrderId order_id, double new_qty, user::UserId user_id);
-            void apply_fill_to_user(user::User* u, engine::OrderId order_id, engine::OrderSide side, double qty, double price);
-            void reserve_on_accept_to_user(user::User* u, engine::OrderId order_id, engine::OrderSide side, double qty, double price);
-            void release_reservation_for_user(user::User* u, engine::OrderId order_id, engine::OrderSide side, double remaining_qty, double price);
-            void setup_user_reservations(user::User* u, std::size_t reserve_size);
+            void apply_fill_to_user(user::User* u, engine::OrderSide side, double qty, double price);
+            void reserve_on_accept_to_user(user::User* u, engine::OrderSide side, double qty, double price);
+            void release_reservation_for_user(user::User* u, engine::OrderSide side, double remaining_qty, double price);
 
             std::vector<engine::OrderId> get_positions(user::UserId user_id, const std::string& ticker) const;
             std::vector<engine::OrderId> get_active_orders(user::UserId user_id, const std::string& ticker) const;
@@ -83,7 +82,7 @@ namespace backtest
                 backtest::runtime::UserAPI* sync_api = nullptr,
                 backtest::runtime::EngineId strategy_engine_id = backtest::runtime::INVALID_ENGINE_ID
             )
-            : strategy_(std::move(strategy)), runtime_(runtime), user_id_(user_id), sync_order_api_(sync_api), capital_(initial_capital), realized_pnl_(0.0), total_volume_(0.0), strategy_engine_id_(strategy_engine_id), position_(0.0), avg_price_(0.0)
+            : strategy_(std::move(strategy)), runtime_(runtime), user_id_(user_id), sync_order_api_(sync_api), capital_(initial_capital), realized_pnl_(0.0), total_volume_(0.0), strategy_engine_id_(strategy_engine_id), position_(0.0), avg_price_(0.0), initial_capital_(initial_capital)
             {
                 published_snapshot_ptr_.store(&snapshots_[0], std::memory_order_relaxed);
                 update_snapshot();
@@ -127,13 +126,15 @@ namespace backtest
             inline bool has_sufficient_shares(engine::Quantity qty) const;
             inline const engine::OrderInfo* get_order_info(engine::OrderId order_id) const;
 
+            void reset_run_stats() noexcept;
+
         private:
             inline double calculate_unrealized_pnl(double current_price) const;
             inline void update_position(double qty, double price);
             inline void update_realized_pnl(double pnl);
-            void reserve_on_accept(engine::OrderId order_id, engine::OrderSide side, double qty, double price);
-            void release_reservation(engine::OrderId order_id, engine::OrderSide side, double remaining_qty, double price);
-            void apply_fill(engine::OrderId order_id, engine::OrderSide side, double qty, double price);
+            void reserve_on_accept(engine::OrderSide side, double qty, double price);
+            void release_reservation(engine::OrderSide side, double remaining_qty, double price);
+            void apply_fill(engine::OrderSide side, double qty, double price);
 
             Strategy strategy_;
             backtest::runtime::EngineRuntime* runtime_;
@@ -143,10 +144,20 @@ namespace backtest
             double capital_;
             double realized_pnl_;
             double total_volume_;
+            double initial_capital_{0.0};
 
             backtest::runtime::EngineId strategy_engine_id_;
             double position_;
             double avg_price_;
+
+            // Run-stats accumulators (O(1) streaming in update_snapshot; reset via reset_run_stats)
+            double prev_pnl_{0.0};
+            double sum_pnl_deltas_{0.0};
+            double sum_sq_pnl_deltas_{0.0};
+            std::size_t n_returns_{0};
+            double running_max_capital_{0.0};
+            double max_drawdown_pct_{0.0};
+            bool first_snapshot_seen_{false};
 
             // Double-buffered snapshot for lock-free main-thread reads (mirror OrderEngine)
             UserSnapshot snapshots_[2];
@@ -174,7 +185,7 @@ namespace backtest
                 std::size_t quantum_orders = 4096, // Interval Between User Strategy Executions & SnapShot Updates
                 std::size_t max_capacity = 1048576, // Max order pool size per engine
                 std::size_t max_engine_count = 100, // Reserve space for this many stocks/engines (avoids realloc of engines_info_ / user_orders_)
-                std::size_t max_strategies = 1000 // Reserve space for this many strategies/users (keeps UserView* from register_strategy valid)
+                std::size_t max_strategies = 1000 // Reserve space for this many strategies/users (keeps UserView* from register_user valid)
             );
             
             // Reset State of instance to allow reinitialization
@@ -263,7 +274,6 @@ namespace backtest
             
             // Engine Statistics / Diagnostics
             std::size_t get_capacity(const std::string& ticker) const;
-            std::size_t get_pending_count(const std::string& ticker) const;
             std::size_t get_placed_count(const std::string& ticker) const;
             std::size_t get_filled_count(const std::string& ticker) const;
             std::size_t get_cancelled_count(const std::string& ticker) const;
@@ -274,8 +284,9 @@ namespace backtest
             std::vector<engine::OrderId> get_active_orders(user::UserId user_id, const std::string& ticker) const;
 
             // Strategy Registration (ticker required for deterministic per-engine quantum). Returns UserView* so client cannot call submit*.
-            user::UserView* register_strategy(const std::string& ticker, user::Strategy strategy, double starting_capital = 100000.0);
-            bool unregister_strategy(user::UserId user_id);
+            user::UserView* register_user(const std::string& ticker, user::Strategy strategy, double starting_capital = 100000.0);
+            bool unregister_user(user::UserId user_id);
+            bool reset_user(user::UserId user_id) noexcept;
 
         private:
             // Private constructor for singleton

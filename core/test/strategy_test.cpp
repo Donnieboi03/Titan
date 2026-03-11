@@ -49,11 +49,11 @@ void test_basic_strategy_registration() {
     assert(registered && "Stock registration failed");
     
     // Register strategies for this ticker (returns UserView* — observational only)
-    user::UserView* user1 = runtime.register_strategy("BTC", market_maker_strategy, 50000.0);
+    user::UserView* user1 = runtime.register_user("BTC", market_maker_strategy, 50000.0);
     assert(user1 != nullptr && "Strategy registration failed");
     assert(user1->get_user_id() == 1 && "First user should have ID 1 (0 is IPO_HOLDER)");
     
-    user::UserView* user2 = runtime.register_strategy("BTC", aggressive_buyer_strategy, 75000.0);
+    user::UserView* user2 = runtime.register_user("BTC", aggressive_buyer_strategy, 75000.0);
     assert(user2 != nullptr && "Second strategy registration failed");
     assert(user2->get_user_id() == 2 && "Second user should have ID 2");
     
@@ -94,7 +94,7 @@ void test_user_wrapper_methods() {
     runtime.register_stock("SOL", 200.0, 50.0);
     runtime.process_pending_orders();
     
-    user::UserView* trader = runtime.register_strategy("SOL", [](user::User* u) {}, 100000.0);
+    user::UserView* trader = runtime.register_user("SOL", [](user::User* u) {}, 100000.0);
     
     // Test price queries (via runtime; client has UserView*)
     double bid = runtime.get_best_bid("SOL");
@@ -129,8 +129,8 @@ void test_position_tracking() {
     runtime.register_stock("MSFT", 400.0, 50.0);
     runtime.process_pending_orders();
     
-    user::UserView* trader = runtime.register_strategy("AAPL", [](user::User* u) {}, 100000.0);
-    user::UserView* trader_msft = runtime.register_strategy("MSFT", [](user::User* u) {}, 100000.0);
+    user::UserView* trader = runtime.register_user("AAPL", [](user::User* u) {}, 100000.0);
+    user::UserView* trader_msft = runtime.register_user("MSFT", [](user::User* u) {}, 100000.0);
     
     // Buy via User submit (tracked; each user on own ticker)
     static_cast<user::User*>(trader)->submit_limit_order(OrderSide::BID, 180.0, 5.0);
@@ -166,7 +166,7 @@ void test_quantum_execution() {
     runtime.register_stock("BTC", 100000.0, 10.0);
     runtime.process_pending_orders();
     
-    user::UserView* trader = runtime.register_strategy("BTC", [](user::User* u) {
+    user::UserView* trader = runtime.register_user("BTC", [](user::User* u) {
         std::cout << "  Strategy called for user " << u->get_user_id() << std::endl;
         double ask = u->get_best_ask();
         if (ask > 0) {
@@ -195,8 +195,8 @@ void test_multi_user_interaction() {
     runtime.process_pending_orders();
     
     // Register multiple users for this ticker (returns UserView*)
-    user::UserView* buyer = runtime.register_strategy("TSLA", [](user::User* u) {}, 100000.0);
-    user::UserView* seller = runtime.register_strategy("TSLA", [](user::User* u) {}, 50000.0);
+    user::UserView* buyer = runtime.register_user("TSLA", [](user::User* u) {}, 100000.0);
+    user::UserView* seller = runtime.register_user("TSLA", [](user::User* u) {}, 50000.0);
     
     std::cout << "✓ Buyer ID: " << buyer->get_user_id() << std::endl;
     std::cout << "✓ Seller ID: " << seller->get_user_id() << std::endl;
@@ -233,7 +233,7 @@ void test_error_handling() {
     runtime.register_stock("NVDA", 500.0, 10.0);
     runtime.process_pending_orders();
     
-    user::UserView* trader = runtime.register_strategy("NVDA", [](user::User* u) {}, 10000.0);
+    user::UserView* trader = runtime.register_user("NVDA", [](user::User* u) {}, 10000.0);
     
     // Try to sell without owning shares (should fail) — submit via User
     OrderId result = static_cast<user::User*>(trader)->submit_limit_order(OrderSide::ASK, 510.0, 5.0);
@@ -306,8 +306,8 @@ void test_simulate_with_example_file() {
     }
 
     // Register strategies for this ticker so they run during simulation (on_book_update every quantum)
-    user::UserView* user_maker = runtime.register_strategy(std::string(ticker), sim_market_maker, 100000.0);
-    user::UserView* user_taker = runtime.register_strategy(std::string(ticker), sim_aggressive_taker, 100000.0);
+    user::UserView* user_maker = runtime.register_user(std::string(ticker), sim_market_maker, 100000.0);
+    user::UserView* user_taker = runtime.register_user(std::string(ticker), sim_aggressive_taker, 100000.0);
     std::cout << "Registered 2 strategies (market maker, aggressive taker); quantum=" << quantum << std::endl;
 
     auto start_wall = std::chrono::high_resolution_clock::now();
@@ -365,8 +365,6 @@ void test_simulate_with_example_file() {
     std::cout << "    Open:                     " << (snap ? snap->open_count : 0) << std::endl;
     std::cout << "    Capacity:                 " << runtime.get_capacity(ticker) << std::endl;
     std::cout << "    Open (utilization):       " << (snap ? snap->open_count : 0) << std::endl;
-    std::cout << "    Pending:                  " << runtime.get_pending_count(ticker) << std::endl;
-
     // Per-user stats (via UserView / snapshot; active orders via runtime)
     std::cout << "\n  User stats (strategies running during sim):" << std::endl;
     auto print_user = [&runtime, &ticker](const char* label, user::UserView* u) {

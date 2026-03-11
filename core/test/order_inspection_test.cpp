@@ -75,7 +75,7 @@ void test_order_inspection() {
     runtime.register_stock(std::string(ticker), 100.0, 1000.0);
     
     // Register strategy for this ticker (returns UserView*; client submits via runtime)
-    UserView* manager = runtime.register_strategy(std::string(ticker), order_managing_strategy, 100000.0);
+    UserView* manager = runtime.register_user(std::string(ticker), order_managing_strategy, 100000.0);
     
     std::cout << "Registered strategy: Manager (User " << manager->get_user_id() << ")\n\n";
     

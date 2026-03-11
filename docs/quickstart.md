@@ -137,7 +137,7 @@ def my_strategy(user):
 Register the strategy for a ticker (e.g. "AAPL"). The strategy is bound to that ticker and runs every **quantum** (every N orders on that ticker), in sync with snapshot updates and L2 recording. The return value is a **UserView** (observational only); use it to read capital and positions. To submit orders from the main thread, use `runtime.submit_limit_order(..., user_id=trader.get_user_id())`.
 
 ```python
-trader = runtime.register_strategy("AAPL", my_strategy, starting_capital=50_000.0)
+trader = runtime.register_user("AAPL", my_strategy, starting_capital=50_000.0)
 print(f"User ID: {trader.get_user_id()}, Capital: ${trader.get_capital():.2f}")
 ```
 

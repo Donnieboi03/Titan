@@ -21,7 +21,7 @@ void test_diagnostics() {
     runtime.register_stock(std::string(ticker), 150.0, 1000.0);
     
     // Register strategy with capital for this ticker (returns UserView*)
-    UserView* trader = runtime.register_strategy(std::string(ticker), [](User* user) {
+    UserView* trader = runtime.register_user(std::string(ticker), [](User* user) {
         double bid = user->get_best_bid();
         if (bid > 0) {
             user->submit_limit_order(OrderSide::BID, bid - 1.0, 10.0);
@@ -34,7 +34,6 @@ void test_diagnostics() {
     std::cout << "Initial Diagnostics:\n";
     std::cout << "  Capacity: " << runtime.get_capacity(ticker) << " orders\n";
     std::cout << "  Utilization: " << (snap ? snap->open_count : 0) << " active\n";
-    std::cout << "  Pending: " << runtime.get_pending_count(ticker) << " queued\n";
     std::cout << "  Placed: " << (snap ? snap->placed_count : 0) << "\n";
     std::cout << "  Open: " << (snap ? snap->open_count : 0) << "\n\n";
     
@@ -45,9 +44,8 @@ void test_diagnostics() {
         u->submit_limit_order(OrderSide::BID, 148.0 + i * 0.1, 5.0);
     }
     
-    std::cout << "After submission (before processing):\n";
-    std::cout << "  Pending: " << runtime.get_pending_count(ticker) << " queued\n\n";
-    
+    std::cout << "After submission (before processing):\n\n";
+
     // Process orders
     runtime.request_snapshot(ticker);
     runtime.process_pending_orders();
@@ -55,7 +53,6 @@ void test_diagnostics() {
     snap = runtime.get_snapshot(ticker);
     std::cout << "After processing:\n";
     std::cout << "  Utilization: " << (snap ? snap->open_count : 0) << " active\n";
-    std::cout << "  Pending: " << runtime.get_pending_count(ticker) << " queued\n";
     std::cout << "  Placed: " << (snap ? snap->placed_count : 0) << "\n";
     std::cout << "  Open: " << (snap ? snap->open_count : 0) << "\n\n";
     

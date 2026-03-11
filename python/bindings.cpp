@@ -110,9 +110,15 @@ PYBIND11_MODULE(titan_core, m) {
         .def_readonly("ticker", &user::UserSnapshot::ticker)
         .def_readonly("position", &user::UserSnapshot::position)
         .def_readonly("avg_price", &user::UserSnapshot::avg_price)
-        .def_readonly("unrealized_pnl", &user::UserSnapshot::unrealized_pnl);
+        .def_readonly("unrealized_pnl", &user::UserSnapshot::unrealized_pnl)
+        .def_readonly("sum_pnl_deltas", &user::UserSnapshot::sum_pnl_deltas)
+        .def_readonly("sum_sq_pnl_deltas", &user::UserSnapshot::sum_sq_pnl_deltas)
+        .def_readonly("n_returns", &user::UserSnapshot::n_returns)
+        .def_readonly("max_drawdown_pct", &user::UserSnapshot::max_drawdown_pct)
+        .def_property_readonly("mean_return", [](const user::UserSnapshot& s) { return s.mean_return(); })
+        .def_property_readonly("variance_of_returns", [](const user::UserSnapshot& s) { return s.variance_of_returns(); });
 
-    // --- UserView (observational handle returned by register_strategy; no submit_*) ---
+    // --- UserView (observational handle returned by register_user; no submit_*) ---
     py::class_<user::UserView>(m, "UserView")
         .def("get_snapshot",
              [](const user::UserView& self) { return self.get_snapshot(); },
@@ -325,7 +331,6 @@ PYBIND11_MODULE(titan_core, m) {
         .def("get_order", get_order_fn, py::arg("ticker"), py::arg("order_id"))
         // Diagnostics
         .def("get_capacity", &runtime::EngineRuntime::get_capacity, py::arg("ticker"))
-        .def("get_pending_count", &runtime::EngineRuntime::get_pending_count, py::arg("ticker"))
         .def("get_positions",
              [](const runtime::EngineRuntime& self, user::UserId user_id, const std::string& ticker) {
                  return self.get_positions(user_id, ticker);
@@ -338,12 +343,14 @@ PYBIND11_MODULE(titan_core, m) {
              py::arg("user_id"), py::arg("ticker"))
         
         // Strategy management
-        .def("unregister_strategy", &runtime::EngineRuntime::unregister_strategy,
+        .def("unregister_user", &runtime::EngineRuntime::unregister_user,
              py::arg("user_id"))
+        .def("reset_user", &runtime::EngineRuntime::reset_user, py::arg("user_id"),
+             "Reset user to just-registered state: cancel all orders, restore initial capital, clear run-stats. Returns True if user exists and was reset.")
 
         // Strategy registration (ticker required for deterministic per-engine quantum; C++ takes std::string&&)
         // Returns UserView* so Python has observational API; for tracked orders use the view's submit_* methods.
-        .def("register_strategy",
+        .def("register_user",
              ([](runtime::EngineRuntime& self, std::string ticker, py::function py_strategy, double starting_capital) -> user::UserView* {
                  user::Strategy cpp_strategy = [py_strategy](user::User* user) {
                      py::gil_scoped_acquire gil;
@@ -353,7 +360,7 @@ PYBIND11_MODULE(titan_core, m) {
                          std::cerr << "Python strategy error: " << e.what() << "\n";
                      }
                  };
-                 return self.register_strategy(std::move(ticker), std::move(cpp_strategy), starting_capital);
+                 return self.register_user(std::move(ticker), std::move(cpp_strategy), starting_capital);
              }),
              py::arg("ticker"), py::arg("strategy"), py::arg("starting_capital") = 100000.0,
              py::return_value_policy::reference);

@@ -149,15 +149,31 @@ class UserSnapshot:
     """Net position in shares (positive = long, negative = short)."""
     avg_price: float
     unrealized_pnl: float
+    sum_pnl_deltas: float
+    """Sum of PnL deltas (return per quantum)."""
+    sum_sq_pnl_deltas: float
+    """Sum of squared PnL deltas (for variance)."""
+    n_returns: int
+    """Number of return periods (quantums)."""
+    max_drawdown_pct: float
+    """Worst drawdown as a percentage of peak capital."""
+    @property
+    def mean_return(self) -> float:
+        """Mean return (sum_pnl_deltas / n_returns). Computed on demand."""
+        ...
+    @property
+    def variance_of_returns(self) -> float:
+        """Sample variance of returns. Computed on demand."""
+        ...
 
 
 # ---------------------------------------------------------------------------
-# UserView (observational handle returned by register_strategy)
+# UserView (observational handle returned by register_user)
 # ---------------------------------------------------------------------------
 
 class UserView:
     """
-    Observational handle returned by ``EngineRuntime.register_strategy()``.
+    Observational handle returned by ``EngineRuntime.register_user()``.
     
     Does **not** expose order submission (submit_limit_order, etc.). Use
     ``runtime.submit_limit_order(ticker, side, price, qty, user_id=view.get_user_id())``
@@ -189,7 +205,7 @@ class User(UserView):
 
     The strategy is bound to a single ticker at registration. All methods
     below operate on that ticker only; no ticker argument is required.
-    The value returned by ``register_strategy()`` is a ``UserView`` (observational only).
+    The value returned by ``register_user()`` is a ``UserView`` (observational only).
     """
 
     # --- Order submission (strategy's ticker) ---
@@ -308,7 +324,7 @@ class EngineRuntime:
             quantum: Number of orders processed between strategy callbacks / snapshot updates.
             max_capacity: Max order pool size per engine (max concurrent open orders).
             max_engine_count: Reserve space for this many stocks/engines (avoids realloc).
-            max_strategies: Reserve space for this many strategies (keeps UserView* from register_strategy valid).
+            max_strategies: Reserve space for this many strategies (keeps UserView* from register_user valid).
         """
         ...
 
@@ -569,12 +585,8 @@ class EngineRuntime:
     def get_capacity(self, ticker: str) -> int:
         """Return order pool capacity (max concurrent open orders) for ticker."""
         ...
-    def get_pending_count(self, ticker: str) -> int:
-        """Return number of orders queued but not yet processed for ticker."""
-        ...
-
     # --- Strategy management ---
-    def register_strategy(
+    def register_user(
         self,
         ticker: str,
         strategy: Callable[[User], None],
@@ -606,12 +618,21 @@ class EngineRuntime:
         """
         ...
 
-    def unregister_strategy(self, user_id: int) -> bool:
+    def unregister_user(self, user_id: int) -> bool:
         """
         Remove a registered strategy by its user ID.
         
-        The slot is freed and may be reused by a future ``register_strategy()``
+        The slot is freed and may be reused by a future ``register_user()``
         call. Returns True on success, False if user_id not found.
+        """
+        ...
+
+    def reset_user(self, user_id: int) -> bool:
+        """
+        Reset the given user to just-registered state: cancel all orders,
+        restore capital to initial value, zero position/PnL, clear run-stats.
+        Use before a new run. Returns True if the user exists and was reset.
+        Parameter: user_id (e.g. from UserView.get_user_id()).
         """
         ...
 

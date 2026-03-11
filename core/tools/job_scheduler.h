@@ -100,6 +100,8 @@ namespace scheduler
         // Producer / Consumer atomic's
         alignas(engine::CACHE_LINE) std::atomic<bool> running_{true};
         std::unique_ptr<AlignedAtomicBool[]> finished_last_job_;
+        // TODO: Integrate ownerid -> atomic orders_pending map
+        // For more fine grain control over owners count of pending orders
 
         std::vector<JobQueue> job_queues_; // Queue for jobs
     };

@@ -100,20 +100,31 @@ void test_strategy_with_real_data(std::string& data_file, const std::string& tic
     );
     
     // Register strategies for this ticker
-    UserView* maker = runtime.register_strategy(std::string(ticker), market_maker_strategy, 100000.0);
-    UserView* taker = runtime.register_strategy(std::string(ticker), aggressive_taker_strategy, 100000.0);
-    
-    for (int i = 0; i < 10000; i++)
-    {
-        runtime.register_strategy(std::string(ticker), aggressive_taker_strategy, 100000.0);
-    }
+    UserView* maker = runtime.register_user(std::string(ticker), market_maker_strategy, 100000.0);
+    UserView* taker = runtime.register_user(std::string(ticker), aggressive_taker_strategy, 100000.0);
     
     std::cout << "Market Maker (User " << maker->get_user_id() << "): $" << maker->get_capital() << " capital\n";
     std::cout << "Aggressive Taker (User " << taker->get_user_id() << "): $" << taker->get_capital() << " capital\n\n";
     
     // Final processing
-    std::cout << "\nProcessing Simulation...\n";
-    runtime.process_pending_orders();
+    runtime.process_pending_orders_async();
+
+    int count = 0;
+    int load_size = 8;
+    while (runtime.is_simulation_running(ticker))
+    {
+        // Calculate the dots
+        std::string dots = std::string((count++) % load_size, '.');
+
+        // We use load_size spaces to ensure the "tail" is always wiped clean
+        if (dots.size() == 0)
+            std::cout << "\rProcessing Simulation" << std::string(load_size, ' ') << std::flush;
+
+        std::cout << "\rProcessing Simulation" << dots << std::flush;
+        
+        // Delay Itteration
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
     
     const auto& sim_metrics = runtime.get_simulation_metrics(ticker);
 
@@ -126,7 +137,7 @@ void test_strategy_with_real_data(std::string& data_file, const std::string& tic
     std::cout << "L2 Orders Edited: " << sim_metrics.orders_edited << "\n";
     std::cout << "L2 Orders Replaced: " << sim_metrics.orders_replaced << "\n";
     std::cout << "Duration: " << sim_metrics.simulation_time_seconds << " seconds\n";
-    std::cout << "Throughput: " << sim_metrics.orders_per_second() << " order ops/sec\n\n";
+    std::cout << "Throughput: " << sim_metrics.updates_per_second() << " updates ops/sec\n\n";
     
     std::cout << "=== Strategy Statistics ===\n";
     std::cout << "Strategy Orders Placed: " << strategy_stats.orders_placed << "\n";

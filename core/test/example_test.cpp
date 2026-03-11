@@ -85,7 +85,7 @@ int main(int argc, char** argv)
     };
 
     // Register the strategy for EXM (returns UserView* — observational only)
-    backtest::user::UserView* trader = runtime.register_strategy("EXM", complex_strategy);
+    backtest::user::UserView* trader = runtime.register_user("EXM", complex_strategy);
     if (!trader) {
         std::cerr << "Failed to register strategy/user" << std::endl;
         return 1;

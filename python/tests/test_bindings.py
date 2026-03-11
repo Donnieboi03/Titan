@@ -107,8 +107,8 @@ def test_strategy_registration():
             user.submit_limit_order("ASK", mid + 1.0, 10.0)
 
     # Register strategy for this ticker
-    trader = runtime.register_strategy("TSLA", my_strategy, starting_capital=50000.0)
-    assert trader is not None, "register_strategy should return a UserView when ticker exists"
+    trader = runtime.register_user("TSLA", my_strategy, starting_capital=50000.0)
+    assert trader is not None, "register_user should return a UserView when ticker exists"
     print(f"✓ Registered strategy, User ID: {trader.get_user_id()}")
     print(f"✓ Starting capital: ${trader.get_capital():.2f}")
 
@@ -204,7 +204,7 @@ def test_order_management():
         user.submit_limit_order("BID", mid - 2.0, 5.0)
         user.submit_limit_order("ASK", mid + 2.0, 5.0)
 
-    manager = runtime.register_strategy("SPY", order_manager, 100000.0)
+    manager = runtime.register_user("SPY", order_manager, 100000.0)
     print(f"✓ Registered order manager, User ID: {manager.get_user_id()}")
 
     # Create market
@@ -253,14 +253,12 @@ def test_diagnostics():
     # Get diagnostics
     capacity = runtime.get_capacity("GOOGL")
     open_count = runtime.get_open_count("GOOGL")
-    pending = runtime.get_pending_count("GOOGL")
     placed = runtime.get_placed_count("GOOGL")
     filled = runtime.get_filled_count("GOOGL")
 
     print(f"✓ Capacity: {capacity:,} orders")
     print(f"✓ Open orders: {open_count}")
     print(f"✓ Utilization %: {open_count/capacity*100:.4f}%")
-    print(f"✓ Pending: {pending} queued")
     print(f"✓ Placed: {placed}")
     print(f"✓ Filled: {filled}")
     print(f"✓ Fill rate: {filled/placed*100:.2f}%" if placed > 0 else "✓ Fill rate: N/A")

@@ -31,7 +31,7 @@ EngineRuntime.get_instance(
 - `quantum` (int): Scheduling quantum in orders. Default: 1000
 - `max_capacity` (int): Max order pool size per engine. Default: 1M (1048576)
 - `max_engine_count` (int): Reserve space for this many stocks/engines (avoids realloc). Default: 100
-- `max_strategies` (int): Reserve space for this many strategies; keeps `UserView*` from `register_strategy()` valid. Default: 1000
+- `max_strategies` (int): Reserve space for this many strategies; keeps `UserView*` from `register_user()` valid. Default: 1000
 
 **Example:**
 ```python
@@ -403,12 +403,12 @@ if info is not None:
 
 ---
 
-#### register_strategy()
+#### register_user()
 
 Register a strategy (callable) for a specific ticker. The strategy is bound to that ticker and invoked every **quantum** (every N orders on that ticker)—the same cadence as snapshot updates and L2 recording. The quantum interval is set at runtime creation via `get_instance(..., quantum=1000)` and can be read with `get_quantum()`.
 
 ```python
-register_strategy(
+register_user(
     ticker: str,
     strategy: Callable[[User], None],
     starting_capital: float = 100000.0
@@ -424,15 +424,29 @@ register_strategy(
 
 ---
 
-#### unregister_strategy()
+#### unregister_user()
 
 Remove a registered strategy (user) by user ID. When a stock is unregistered, all strategies for that ticker are automatically unregistered.
 
 ```python
-unregister_strategy(user_id: int) -> bool
+unregister_user(user_id: int) -> bool
 ```
 
 **Returns:** `True` on success, `False` if user_id not found.
+
+---
+
+#### reset_user()
+
+Resets the given user to the state they were in when first registered: cancels all of the user's orders, restores capital to the initial value from registration, zeros position and PnL, and clears run-stats (mean_return, variance_of_returns, max_drawdown_pct, n_returns). Use before a new run so the user starts clean and stats reflect only that run.
+
+```python
+reset_user(user_id: int) -> bool
+```
+
+**Parameters:** `user_id` — from `UserView.get_user_id()`.
+
+**Returns:** `True` if the user exists and was reset, `False` otherwise.
 
 ---
 
@@ -667,7 +681,7 @@ class L3Event:
 
 ### TradingStrategy
 
-Optional base class that provides callback hooks (e.g. on_order_fill, on_market_data). Use it if you want event-driven callbacks; you can also use a plain callable with `register_strategy()`. How you implement trading logic is up to you.
+Optional base class that provides callback hooks (e.g. on_order_fill, on_market_data). Use it if you want event-driven callbacks; you can also use a plain callable with `register_user()`. How you implement trading logic is up to you.
 
 #### Constructor
 
@@ -797,9 +811,9 @@ class OrderSide(Enum):
 
 ### UserView and UserSnapshot
 
-**`UserView`** is the type returned by `register_strategy()`. It exposes only observational methods: `get_snapshot()`, `get_capital()`, `get_realized_pnl()`, `get_total_volume()`, `get_user_id()`, `get_ticker()`, `get_position()`, `get_all_positions()`, `get_committed_sell_qty()`, `get_unrealized_pnl()`. (Each strategy is tied to one ticker, so position/committed/unrealized PnL are scalars.) `get_unrealized_pnl()` returns the snapshot value (mark-to-market at the strategy ticker's market price as of the last snapshot update). It does **not** expose `submit_limit_order` or other order submission; use `runtime.submit_*(..., user_id=view.get_user_id())` for that. For order IDs (positions/active orders) use `runtime.get_positions(view.get_user_id(), ticker)` and `runtime.get_active_orders(view.get_user_id(), ticker)`.
+**`UserView`** is the type returned by `register_user()`. It exposes only observational methods: `get_snapshot()`, `get_capital()`, `get_realized_pnl()`, `get_total_volume()`, `get_user_id()`, `get_ticker()`, `get_position()`, `get_all_positions()`, `get_committed_sell_qty()`, `get_unrealized_pnl()`. (Each strategy is tied to one ticker, so position/committed/unrealized PnL are scalars.) `get_unrealized_pnl()` returns the snapshot value (mark-to-market at the strategy ticker's market price as of the last snapshot update). It does **not** expose `submit_limit_order` or other order submission; use `runtime.submit_*(..., user_id=view.get_user_id())` for that. For order IDs (positions/active orders) use `runtime.get_positions(view.get_user_id(), ticker)` and `runtime.get_active_orders(view.get_user_id(), ticker)`.
 
-**`UserSnapshot`** is the struct returned by `UserView.get_snapshot()`. It contains a copy of user state updated each quantum: `user_id`, `capital`, `realized_pnl`, `total_volume`, `ticker`, `position`, `avg_price`, `committed_sell_qty`, `unrealized_pnl` (single-ticker per strategy). Safe to hold and inspect from the main thread.
+**`UserSnapshot`** is the struct returned by `UserView.get_snapshot()`. It contains a copy of user state updated each quantum: `user_id`, `capital`, `realized_pnl`, `total_volume`, `ticker`, `position`, `avg_price`, `committed_sell_qty`, `unrealized_pnl` (single-ticker per strategy), plus run-stats: `sum_pnl_deltas`, `sum_sq_pnl_deltas`, `n_returns`, `max_drawdown_pct` (stored), and `mean_return` and `variance_of_returns` (computed on demand, like SimulationMetrics rates). Call `runtime.reset_user(user_id)` to reset the user to just-registered state (cancel orders, restore initial capital, clear run-stats) for a fresh run. Safe to hold and inspect from the main thread.
 
 **`User`** is the type passed **into** the strategy callback. It extends `UserView` and adds full order submission and market data. All methods operate on the strategy's registered ticker; **no ticker parameter** is passed (e.g. `user.submit_limit_order(side, price, qty)`, `user.get_best_bid()`, `user.get_positions()`, `user.get_order_info(order_id)`). Use it only inside the strategy callable.
 

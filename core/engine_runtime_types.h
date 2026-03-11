@@ -70,6 +70,22 @@ namespace backtest
             double position{0.0};
             double avg_price{0.0};
             double unrealized_pnl{0.0};
+
+            // Run-stats (updated each quantum; reset via EngineRuntime::reset_user)
+            double sum_pnl_deltas{0.0};
+            double sum_sq_pnl_deltas{0.0};
+            std::size_t n_returns{0};
+            double max_drawdown_pct{0.0};
+
+            double mean_return() const {
+                return (n_returns > 0) ? sum_pnl_deltas / static_cast<double>(n_returns) : 0.0;
+            }
+            double variance_of_returns() const {
+                if (n_returns <= 1) return 0.0;
+                const double n = static_cast<double>(n_returns);
+                const double mean = sum_pnl_deltas / n;
+                return (sum_sq_pnl_deltas - sum_pnl_deltas * mean) / (n - 1.0);
+            }
         };
 
         // Strategy callback: use pointer to allow null-checks and match call-sites
