@@ -2,6 +2,15 @@
 
 This guide explains the two ways Titan can record order book data, when to use each, and the rationale behind choosing one over the other.
 
+## Recording modes (runtime)
+
+The runtime supports two recording modes via `set_record(ticker, enable, path_override?, record_type?)`:
+
+- **TOPK** (default) – Every **quantum**, write a full top-of-book snapshot (top K bid/ask levels) to a CSV. Per-engine state lives in `OrderEngineInfo`; buffers and streams used by the event thread live in a dedicated cache-line-aligned struct to avoid false sharing.
+- **FEATURES** – Every quantum, write one row of feature scalars (timestamp, best_bid, best_ask, mid_price, spread, order_imbalance, spread_bps) to a CSV (e.g. `{ticker}_features.csv`). Suited for training (e.g. Prometheus).
+
+If you do not pass `record_type`, the default is **TOPK**. See [API Reference – set_record](api.md#set_record--get_record--get_record_type).
+
 ## Two ways to record L2
 
 ### 1. Incremental stream (level updates)
@@ -27,7 +36,7 @@ This guide explains the two ways Titan can record order book data, when to use e
 
 **Where it lives:**
 
-- **Titan runtime:** `set_record(ticker, True)` (and optional `path_override`). When enabled, the engine writes a book snapshot every quantum via its event management thread. See [API Reference – set_record](api.md#set_record--get_record).
+- **Titan runtime:** `set_record(ticker, True)` (and optional `path_override`). When enabled, the engine writes a book snapshot every quantum via its event management thread. See [API Reference – set_record](api.md#set_record--get_record--get_record_type).
 
 **Use for:**
 
@@ -35,7 +44,7 @@ This guide explains the two ways Titan can record order book data, when to use e
 - **Time-series of top-of-book** – Best bid, best ask, spread, depth over time (e.g. plot or compute imbalance) without replaying ticks.
 - **Debugging** – Inspect engine state at quantum boundaries.
 
-**Do not use as the only source for replay** – Snapshots lose the event sequence between intervals. For faithful replay, use the incremental stream. See [API Reference – set_record](api.md#set_record--get_record) for how to enable TopK recording in the runtime.
+**Do not use as the only source for replay** – Snapshots lose the event sequence between intervals. For faithful replay, use the incremental stream. See [API Reference – set_record](api.md#set_record--get_record--get_record_type) for how to enable TopK recording in the runtime.
 
 ---
 

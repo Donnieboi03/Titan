@@ -354,33 +354,45 @@ get_notify_order() -> bool
 
 ---
 
-#### set_record() / get_record()
+#### set_record() / get_record() / get_record_type()
 
-Enable or disable per-ticker L2 recording. When enabled, the **order book snapshot** (top 20 bid and 20 ask levels, in L2 format) is written at each **quantum**—the same cadence as strategy callbacks and snapshot updates. Recording is lock-free and applies to both simulation (e.g. `simulate()`) and live order flow (e.g. `submit_limit_order`, `process_pending_orders`). Each quantum emits up to 40 L2 rows (20 bid + 20 ask) for that ticker. Output is written by the event management thread to the default path `{ticker}.csv`, or to a custom path when provided.
+Enable or disable per-ticker L2 recording and choose the **recording mode**. Recording is lock-free and applies to both simulation (e.g. `simulate()`) and live order flow. Output is written by the event management thread.
+
+**Recording modes (`RecordType`):**
+- **TOPK** (default): At each **quantum**, write a full **order book snapshot** (top 20 bid and 20 ask levels, L2 format) to CSV. Same cadence as strategy callbacks. Default path `{ticker}.csv`, or use `path_override`.
+- **FEATURES**: At each quantum, write one row of **feature scalars** (timestamp, best_bid, best_ask, mid_price, spread, order_imbalance, spread_bps) to a CSV (e.g. `{ticker}_features.csv`). Suited for training pipelines.
+
+Calls that do not pass `record_type` default to **TOPK**.
 
 ```python
 set_record(ticker: str, enable: bool) -> None
 set_record(ticker: str, enable: bool, path_override: str) -> None
+set_record(ticker: str, enable: bool, path_override: str, record_type: RecordType) -> None
 get_record(ticker: str) -> bool
+get_record_type(ticker: str) -> RecordType
 ```
 
 **Parameters:**
 - `ticker`: Stock symbol (must be registered).
 - `enable`: `True` to record, `False` to stop.
-- `path_override` (optional): Custom output path (e.g. `"output/AAPL.csv"`). When provided, recordings go to this file instead of the default `{ticker}.csv`.
+- `path_override` (optional): Custom output path (e.g. `"output/AAPL.csv"`). When provided, recordings go to this file (or, for FEATURES, a derived path such as `output/AAPL_features.csv`).
+- `record_type` (optional): One of `RecordType.TOPK` or `RecordType.FEATURES`. Omitted calls default to `RecordType.TOPK`.
 
 **Example:**
 ```python
+import titan.titan_core as tc
+
 runtime.register_stock("AAPL", 150.0, 1_000_000.0)
-runtime.set_record("AAPL", True)  # Enable quantum-based book snapshot recording to AAPL.csv
-# Or with custom path:
-runtime.set_record("AAPL", True, "recordings/aapl_replay.csv")
-runtime.simulate("data/aapl_l2.csv", "AAPL")  # (or use live orders + process_pending_orders)
-print(runtime.get_record("AAPL"))  # True
+runtime.set_record("AAPL", True)  # TOPK (default): book snapshot every quantum to AAPL.csv
+runtime.set_record("AAPL", True, "recordings/aapl.csv")  # Custom path, still TOPK
+runtime.set_record("AAPL", True, "", tc.RecordType.FEATURES)  # Feature rows to AAPL_features.csv
+runtime.simulate("data/aapl_l2.csv", "AAPL")
+print(runtime.get_record("AAPL"))   # True
+print(runtime.get_record_type("AAPL"))  # RecordType.FEATURES
 runtime.set_record("AAPL", False)  # Stop recording
 ```
 
-**See also:** [L2 Data and Recording](l2_data_and_recording.md) – When to use runtime snapshots vs an incremental stream for replay and analysis.
+**See also:** [L2 Data and Recording](l2_data_and_recording.md) – Recording modes and when to use each.
 
 ---
 

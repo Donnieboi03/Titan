@@ -75,7 +75,6 @@ namespace engine
         OrderMemoryPool order_pool_;
         LazyQueue<std::pair<OrderId, Timestamp>> order_queue_;
         OrderNodePool node_pool_;  // Pool for OrderNode allocations
-        
         BidBook bid_book_;
         AskBook ask_book_;
         LevelMap bid_levels_;

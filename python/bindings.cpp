@@ -71,6 +71,11 @@ PYBIND11_MODULE(titan_core, m) {
         .value("MARKET", engine::OrderType::MARKET)
         .export_values();
 
+    py::enum_<runtime::RecordType>(m, "RecordType")
+        .value("TOPK", runtime::RecordType::TOPK)
+        .value("FEATURES", runtime::RecordType::FEATURES)
+        .export_values();
+
     // --- OrderInfo (read-only struct) ---
     py::class_<engine::OrderInfo>(m, "OrderInfo")
         .def_readonly("price", &engine::OrderInfo::price_)
@@ -321,7 +326,13 @@ PYBIND11_MODULE(titan_core, m) {
                  self.set_record(std::move(ticker), enable, std::move(path_override));
              },
              py::arg("ticker"), py::arg("enable"), py::arg("path_override"))
+        .def("set_record",
+             [](runtime::EngineRuntime& self, std::string ticker, bool enable, std::string path_override, runtime::RecordType record_type) {
+                 self.set_record(std::move(ticker), enable, std::move(path_override), record_type);
+             },
+             py::arg("ticker"), py::arg("enable"), py::arg("path_override"), py::arg("record_type"))
         .def("get_record", &runtime::EngineRuntime::get_record, py::arg("ticker"))
+        .def("get_record_type", &runtime::EngineRuntime::get_record_type, py::arg("ticker"))
         
         // Statistics
         .def("get_placed_count", &runtime::EngineRuntime::get_placed_count, py::arg("ticker"))

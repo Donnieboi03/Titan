@@ -40,8 +40,6 @@ void backtest::runtime::EngineRuntime::reset_instance()
         s_instance_ptr->user_orders_.clear();
         s_instance_ptr->users_.clear();
         s_instance_ptr->user_strategy_engine_id_.clear();
-        s_instance_ptr->record_enabled_.clear();
-        s_instance_ptr->record_path_override_.clear();
 
         instance_initialized_ = false;
 
@@ -105,11 +103,6 @@ bool backtest::runtime::EngineRuntime::register_stock(const std::string& ticker,
         // Engine-first: one EngineOrders per engine; new engine gets default empty by_user
         user_orders_.resize(engines_info_.size());
 
-        // Grow per-engine recording state and per-engine strategy list
-        while (record_enabled_.size() <= engine_id) {
-            record_enabled_.push_back(std::make_unique<std::atomic<bool>>(false));
-            record_path_override_.push_back({});
-        }
         // Place initial sell at IPO Price and IPO Quantity (from IPO holder)
         engine::OrderId ipo_order;
         if (users_.empty()) {
@@ -200,9 +193,7 @@ bool backtest::runtime::EngineRuntime::unregister_stock(const std::string& ticke
 
         auto& engine_info = engines_info_[engine_id];
 
-        if (engine_id < record_enabled_.size() && record_enabled_[engine_id]) {
-            record_enabled_[engine_id]->store(false, std::memory_order_relaxed);
-        }
+        engines_info_[engine_id].event_.record_enabled_.store(false, std::memory_order_relaxed);
 
         // Wait for worker to finish batch
         scheduler_.process_jobs_on(engine_info.submit_.worker_id_);
@@ -1506,7 +1497,7 @@ bool backtest::runtime::EngineRuntime::simulate
         {
             if (update.is_snapshot) continue;
             ++updates;
-            
+
             if (update.price > 0.0) 
             {
                 engine::OrderSide side = (update.side == 'b' || update.side == 'B')
@@ -1974,8 +1965,6 @@ backtest::runtime::EngineRuntime::EngineRuntime(std::size_t num_threads, bool _v
     quantum_orders_(quantum_orders),
     max_engine_count_(max_engine_count),
     max_strategies_(max_strategies),
-    log_buffer_(LOG_BUFFER_CAPACITY),
-    record_buffer_(RECORD_BUFFER_CAPACITY),
     sync_order_api_(this)
 {
     // Initialize runtime batch size to scheduler's batch capacity by default
@@ -2010,25 +1999,36 @@ void backtest::runtime::EngineRuntime::start_event_management_thread() noexcept
 
 void backtest::runtime::EngineRuntime::stop_event_management_thread() noexcept
 {
-    // Flush producer buffers so event thread can drain any pending log/record data
-    log_buffer_.try_flush();
-    record_buffer_.try_flush();
+    // Flush producer buffers so event thread can drain any pending log/record/features data
+    event_path_.log_buffer_.try_flush();
+    event_path_.record_buffer_.try_flush();
+    event_path_.features_buffer_.try_flush();
     // Wait for event thread to drain (JobScheduler pattern)
-    while (record_buffer_.pending_reads() > 0 || log_buffer_.pending_reads() > 0)
+    while (event_path_.record_buffer_.pending_reads() > 0
+           || event_path_.log_buffer_.pending_reads() > 0
+           || event_path_.features_buffer_.pending_reads() > 0)
         std::this_thread::yield();
     event_management_thread_running_.store(false);
     if (event_management_thread_.joinable()) 
     {
         event_management_thread_.join();
     }
-    // Flush and close all open record streams (event management thread is stopped)
-    for (auto& kv : record_streams_) 
+    // Flush and close all open record/features streams (event management thread is stopped)
+    for (auto& kv : event_path_.record_streams_) 
     {
         if (kv.second) {
             kv.second->flush();
         }
     }
-    record_streams_.clear();
+    event_path_.record_streams_.clear();
+    for (auto& kv : event_path_.features_streams_) 
+    {
+        if (kv.second) {
+            kv.second->flush();
+            kv.second->close();
+        }
+    }
+    event_path_.features_streams_.clear();
 }
 
 void backtest::runtime::EngineRuntime::event_management_loop() noexcept
@@ -2039,16 +2039,16 @@ void backtest::runtime::EngineRuntime::event_management_loop() noexcept
 
         // Drain record buffer first (lazy-open L2Stream per engine_id, write updates)
         RecordItem item;
-        while (record_buffer_.try_pop(item)) 
+        while (event_path_.record_buffer_.try_pop(item)) 
         {
             did_work = true;
             EngineId eid = item.first;
             const stream::L2Update& update = item.second;
             if (eid >= engines_info_.size()) continue;
             const std::string& ticker = engines_info_[eid].submit_.ticker_;
-            std::string path = (eid < record_path_override_.size() && !record_path_override_[eid].empty())
-                ? record_path_override_[eid] : ticker + ".csv";
-            auto& streams = record_streams_;
+            const std::string& path_override = engines_info_[eid].event_.record_path_override_;
+            std::string path = !path_override.empty() ? path_override : ticker + ".csv";
+            auto& streams = event_path_.record_streams_;
             auto it = streams.find(eid);
             if (it == streams.end()) 
             {
@@ -2058,9 +2058,44 @@ void backtest::runtime::EngineRuntime::event_management_loop() noexcept
             if (it->second) it->second->write(update);
         }
 
+        // Drain features buffer (one CSV row per item; lazy-open ofstream per engine_id)
+        FeaturesItem feat_item;
+        while (event_path_.features_buffer_.try_pop(feat_item)) 
+        {
+            did_work = true;
+            EngineId eid = feat_item.first;
+            const FeaturesRecord& rec = feat_item.second;
+            if (eid >= engines_info_.size()) continue;
+            const std::string& ticker = engines_info_[eid].submit_.ticker_;
+            const std::string& path_override = engines_info_[eid].event_.record_path_override_;
+            std::string base = !path_override.empty() ? path_override : ticker + ".csv";
+            std::string path = base;
+            if (path.size() >= 4 && path.compare(path.size() - 4, 4, ".csv") == 0)
+                path = path.substr(0, path.size() - 4) + "_features.csv";
+            else
+                path = path + "_features";
+            auto& streams = event_path_.features_streams_;
+            auto it = streams.find(eid);
+            if (it == streams.end()) 
+            {
+                auto ptr = std::make_unique<std::ofstream>(path);
+                if (ptr->is_open()) {
+                    *ptr << "timestamp,best_bid,best_ask,mid_price,spread,order_imbalance,spread_bps\n";
+                    it = streams.emplace(eid, std::move(ptr)).first;
+                }
+                else
+                    continue;
+            }
+            if (it->second && it->second->is_open()) {
+                *it->second << rec.timestamp << "," << rec.best_bid << "," << rec.best_ask << ","
+                    << rec.mid_price << "," << rec.spread << "," << rec.order_imbalance << ","
+                    << rec.spread_bps << "\n";
+            }
+        }
+
         // Drain log buffer (cout)
         std::string msg;
-        while (log_buffer_.try_pop(msg)) 
+        while (event_path_.log_buffer_.try_pop(msg)) 
         {
             did_work = true;
             std::cout << msg << std::endl;
@@ -2076,18 +2111,18 @@ void backtest::runtime::EngineRuntime::event_management_loop() noexcept
 void backtest::runtime::EngineRuntime::notify(const std::string& message) noexcept
 {
     if (!verbose_) return;
-    while (!log_buffer_.try_emplace(std::move(message)))
+    while (!event_path_.log_buffer_.try_emplace(std::move(message)))
     {
-        log_buffer_.try_flush();
+        event_path_.log_buffer_.try_flush();
         std::this_thread::yield();
     }
 }
 
 void backtest::runtime::EngineRuntime::record(EngineId engine_id, const stream::L2Update& update) noexcept
 {
-    while (!record_buffer_.try_emplace(engine_id, update))
+    while (!event_path_.record_buffer_.try_emplace(engine_id, update))
     {
-        record_buffer_.try_flush();
+        event_path_.record_buffer_.try_flush();
         std::this_thread::yield();
     }
 }
@@ -2119,13 +2154,48 @@ void backtest::runtime::EngineRuntime::record_book_snapshot(EngineId engine_id) 
     }
 }
 
+void backtest::runtime::EngineRuntime::record_features_snapshot(EngineId engine_id) noexcept
+{
+    const engine::MarketSnapshot* snap = get_snapshot_fast(engine_id);
+    if (!snap || snap->bid_levels == 0 || snap->ask_levels == 0) return;
+
+    const int64_t ts = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
+    double best_bid = math::ticks_to_dollars(snap->bid_prices[0]);
+    double best_ask = math::ticks_to_dollars(snap->ask_prices[0]);
+    double mid_price = (best_bid + best_ask) * 0.5;
+    double spread = best_ask - best_bid;
+    double bid_vol = math::internal_to_qty(snap->bid_depth[0]);
+    double ask_vol = math::internal_to_qty(snap->ask_depth[0]);
+    double order_imbalance = bid_vol - ask_vol;
+    double spread_bps = (mid_price > 0.0) ? (spread / mid_price) * 1e4 : 0.0;
+
+    FeaturesRecord rec;
+    rec.timestamp = ts;
+    rec.best_bid = best_bid;
+    rec.best_ask = best_ask;
+    rec.mid_price = mid_price;
+    rec.spread = spread;
+    rec.order_imbalance = order_imbalance;
+    rec.spread_bps = spread_bps;
+
+    while (!event_path_.features_buffer_.try_emplace(engine_id, rec))
+    {
+        event_path_.features_buffer_.try_flush();
+        std::this_thread::yield();
+    }
+}
+
 void backtest::runtime::EngineRuntime::set_record(const std::string& ticker, bool enable) noexcept
 {
     auto it = ticker_to_engine_id_.find(ticker);
     if (it == ticker_to_engine_id_.end()) return;
     EngineId eid = it->second;
-    if (eid >= record_enabled_.size() || !record_enabled_[eid]) return;
-    record_enabled_[eid]->store(enable, std::memory_order_relaxed);
+    if (eid >= engines_info_.size()) return;
+    engines_info_[eid].event_.record_enabled_.store(enable, std::memory_order_relaxed);
+    engines_info_[eid].event_.record_type_ = RecordType::TOPK;
 }
 
 void backtest::runtime::EngineRuntime::set_record(const std::string& ticker, bool enable, const std::string& path_override) noexcept
@@ -2133,12 +2203,21 @@ void backtest::runtime::EngineRuntime::set_record(const std::string& ticker, boo
     auto it = ticker_to_engine_id_.find(ticker);
     if (it == ticker_to_engine_id_.end()) return;
     EngineId eid = it->second;
-    if (eid >= record_enabled_.size() || !record_enabled_[eid]) return;
-    record_enabled_[eid]->store(enable, std::memory_order_relaxed);
-    if (eid < record_path_override_.size()) 
-    {
-        record_path_override_[eid] = enable ? std::move(path_override) : std::string();
-    }
+    if (eid >= engines_info_.size()) return;
+    engines_info_[eid].event_.record_enabled_.store(enable, std::memory_order_relaxed);
+    engines_info_[eid].event_.record_path_override_ = enable ? path_override : std::string();
+    engines_info_[eid].event_.record_type_ = RecordType::TOPK;
+}
+
+void backtest::runtime::EngineRuntime::set_record(const std::string& ticker, bool enable, const std::string& path_override, RecordType record_type) noexcept
+{
+    auto it = ticker_to_engine_id_.find(ticker);
+    if (it == ticker_to_engine_id_.end()) return;
+    EngineId eid = it->second;
+    if (eid >= engines_info_.size()) return;
+    engines_info_[eid].event_.record_enabled_.store(enable, std::memory_order_relaxed);
+    engines_info_[eid].event_.record_path_override_ = enable ? path_override : std::string();
+    engines_info_[eid].event_.record_type_ = record_type;
 }
 
 bool backtest::runtime::EngineRuntime::get_record(const std::string& ticker) const noexcept
@@ -2146,8 +2225,17 @@ bool backtest::runtime::EngineRuntime::get_record(const std::string& ticker) con
     auto it = ticker_to_engine_id_.find(ticker);
     if (it == ticker_to_engine_id_.end()) return false;
     EngineId eid = it->second;
-    if (eid >= record_enabled_.size() || !record_enabled_[eid]) return false;
-    return record_enabled_[eid]->load(std::memory_order_relaxed);
+    if (eid >= engines_info_.size()) return false;
+    return engines_info_[eid].event_.record_enabled_.load(std::memory_order_relaxed);
+}
+
+backtest::runtime::RecordType backtest::runtime::EngineRuntime::get_record_type(const std::string& ticker) const noexcept
+{
+    auto it = ticker_to_engine_id_.find(ticker);
+    if (it == ticker_to_engine_id_.end()) return RecordType::TOPK;
+    EngineId eid = it->second;
+    if (eid >= engines_info_.size()) return RecordType::TOPK;
+    return engines_info_[eid].event_.record_type_;
 }
 
 void backtest::runtime::EngineRuntime::update_snapshot_internal(EngineId engine_id) const noexcept
@@ -2306,11 +2394,15 @@ void backtest::runtime::EngineRuntime::increment_order_counter(EngineId engine_i
 {
     if (engine_id >= engines_info_.size()) return;
     auto& info = engines_info_[engine_id];
-    if (++info.worker_.orders_since_quantum_ >= quantum_orders_) {
+        if (++info.worker_.orders_since_quantum_ >= quantum_orders_) {
         info.worker_.orders_since_quantum_ = 0;
         update_snapshot_internal(engine_id);
-        if (engine_id < record_enabled_.size() && record_enabled_[engine_id]->load(std::memory_order_relaxed))
-            record_book_snapshot(engine_id);
+        if (info.event_.record_enabled_.load(std::memory_order_relaxed)) {
+            if (info.event_.record_type_ == RecordType::TOPK)
+                record_book_snapshot(engine_id);
+            else if (info.event_.record_type_ == RecordType::FEATURES)
+                record_features_snapshot(engine_id);
+        }
         if (engine_id < engines_info_.size()) {
             for (std::size_t idx : engines_info_[engine_id].user_indices_) {
                 if (idx < users_.size()) {

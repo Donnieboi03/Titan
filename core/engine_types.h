@@ -252,7 +252,7 @@ namespace engine
     };
 
     // Lock-free market snapshot for instant reads
-    struct MarketSnapshot
+    struct alignas(CACHE_LINE) MarketSnapshot
     {
         Price best_bid;
         Price best_ask;

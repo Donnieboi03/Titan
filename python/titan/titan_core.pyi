@@ -70,6 +70,14 @@ class RejectReason(enum.Enum):
     """Cancel/edit targeted an order that does not exist."""
 
 
+class RecordType(enum.Enum):
+    """Recording mode for L2 data during simulate() and live order flow."""
+    TOPK: RecordType
+    """Record a full book snapshot every quantum (default)."""
+    FEATURES: RecordType
+    """Record one row of feature scalars per quantum (CSV for training)."""
+
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -558,13 +566,25 @@ class EngineRuntime:
         """
         Enable or disable per-ticker L2 recording with a custom output file path.
         When enable=True, recordings go to path_override instead of the default {ticker}.csv.
+        Default record type is TOPK.
         """
         ...
 
-    def set_record(self, ticker: str, enable: bool, path_override: str = "") -> None: ...
+    @overload
+    def set_record(self, ticker: str, enable: bool, path_override: str, record_type: RecordType) -> None:
+        """
+        Enable or disable per-ticker recording with path and record type (TOPK, FEATURES).
+        """
+        ...
+
+    def set_record(self, ticker: str, enable: bool, path_override: str = "", record_type: RecordType = ...) -> None: ...
 
     def get_record(self, ticker: str) -> bool:
         """Return True if L2 recording is enabled for the given ticker."""
+        ...
+
+    def get_record_type(self, ticker: str) -> RecordType:
+        """Return the current recording mode for the given ticker (TOPK or FEATURES)."""
         ...
 
     # --- Statistics ---

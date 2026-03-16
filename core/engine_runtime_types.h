@@ -2,6 +2,7 @@
 #define ENGINE_RUNTIME_TYPES_H
 
 #include "order_engine.h"
+#include <atomic>
 #include <string>
 #include <vector>
 #include <utility>
@@ -60,7 +61,7 @@ namespace backtest
 
         // Lock-free user state snapshot for main-thread reads (double-buffered like MarketSnapshot).
         // Single-ticker: each strategy is tied to one ticker at registration.
-        struct UserSnapshot
+        struct alignas(engine::CACHE_LINE) UserSnapshot
         {
             UserId user_id{INVALID_USER_ID};
             double capital{0.0};
@@ -100,7 +101,7 @@ namespace backtest
         class EngineRuntime; // forward declaration
 
         // Simulation metrics structure for async simulation tracking (double-buffered)
-        struct SimulationMetrics {
+        struct alignas(engine::CACHE_LINE) SimulationMetrics {
             // Core metrics (no atomics - double buffered instead)
             std::size_t market_updates_processed{0};
             std::size_t orders_placed{0};
@@ -150,6 +151,21 @@ namespace backtest
             }
         };
 
+        // Recording mode: TOPK = snapshot per quantum (L2 rows); FEATURES = one row of scalars per quantum
+        enum class RecordType { TOPK, FEATURES };
+
+        // One row of feature scalars for FEATURES recording (Prometheus vocabulary-aligned)
+        struct FeaturesRecord
+        {
+            int64_t timestamp{0};
+            double best_bid{0.0};
+            double best_ask{0.0};
+            double mid_price{0.0};
+            double spread{0.0};
+            double order_imbalance{0.0};
+            double spread_bps{0.0};
+        };
+
         // Submit path: main thread reads (worker_id_, capacity_, ticker_, ipo_shares_)
         struct alignas(engine::CACHE_LINE) OrderEngineInfoSubmitPath
         {
@@ -168,6 +184,29 @@ namespace backtest
             std::unordered_map<engine::OrderId, user::UserId> order_to_user_;
         };
 
+        // Event path: per-engine record config used by event management thread
+        struct alignas(engine::CACHE_LINE) OrderEngineInfoEventPath
+        {
+            std::atomic<bool> record_enabled_{false};
+            std::string record_path_override_;
+            RecordType record_type_{RecordType::TOPK};
+
+            OrderEngineInfoEventPath() = default;
+            OrderEngineInfoEventPath(OrderEngineInfoEventPath&& other) noexcept
+                : record_path_override_(std::move(other.record_path_override_)),
+                  record_type_(other.record_type_)
+            {
+                record_enabled_.store(other.record_enabled_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            }
+            OrderEngineInfoEventPath& operator=(OrderEngineInfoEventPath&& other) noexcept
+            {
+                record_enabled_.store(other.record_enabled_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                record_path_override_ = std::move(other.record_path_override_);
+                record_type_ = other.record_type_;
+                return *this;
+            }
+        };
+
         // Engine-first: one per engine; by_user indexed by user_id
         struct alignas(engine::CACHE_LINE) EngineOrders
         {
@@ -181,8 +220,10 @@ namespace backtest
             std::vector<std::size_t> user_indices_;  // indices into users_ for strategies on this engine
 
             // Cache-line aligned to prevent false sharing
-            alignas(engine::CACHE_LINE) SimulationMetrics sim_metrics_[2];  // Double-buffered simulation metrics
+            SimulationMetrics sim_metrics_[2];  // Double-buffered simulation metrics
             alignas(engine::CACHE_LINE) std::atomic<int> sim_metrics_index_{0};  // 0 or 1, which buffer readers see
+
+            OrderEngineInfoEventPath event_;  // Per-engine record config (set_record / get_record_type)
 
             // Default Constructor
             OrderEngineInfo() = default;
@@ -214,7 +255,8 @@ namespace backtest
                 : submit_(std::move(other.submit_)),
                   worker_(std::move(other.worker_)),
                   user_indices_(std::move(other.user_indices_)),
-                  sim_metrics_index_(other.sim_metrics_index_.load(std::memory_order_relaxed))
+                  sim_metrics_index_(other.sim_metrics_index_.load(std::memory_order_relaxed)),
+                  event_(std::move(other.event_))
             {
                 sim_metrics_[0] = other.sim_metrics_[0];
                 sim_metrics_[1] = other.sim_metrics_[1];
@@ -230,6 +272,7 @@ namespace backtest
                     sim_metrics_[0] = other.sim_metrics_[0];
                     sim_metrics_[1] = other.sim_metrics_[1];
                     sim_metrics_index_.store(other.sim_metrics_index_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                    event_ = std::move(other.event_);
                 }
                 return *this;
             }

@@ -9,6 +9,8 @@
 #include <iomanip>
 #include <tuple>
 #include <atomic>
+#include <fstream>
+#include <memory>
 
 
 namespace backtest
@@ -226,7 +228,9 @@ namespace backtest
             // Per-ticker L2 recording (written by event management thread; hot path is lock-free)
             void set_record(const std::string& ticker, bool enable) noexcept;
             void set_record(const std::string& ticker, bool enable, const std::string& path_override) noexcept;
+            void set_record(const std::string& ticker, bool enable, const std::string& path_override, RecordType record_type) noexcept;
             bool get_record(const std::string& ticker) const noexcept;
+            RecordType get_record_type(const std::string& ticker) const noexcept;
            
             // Control engine matching (toggle ON/OF allowing for control of books)
             bool set_auto_match(const std::string& ticker, bool auto_match);
@@ -302,6 +306,7 @@ namespace backtest
             void notify(const std::string& message) noexcept;
             void record(EngineId engine_id, const stream::L2Update& update) noexcept;
             void record_book_snapshot(EngineId engine_id) noexcept;
+            void record_features_snapshot(EngineId engine_id) noexcept;
 
             // Snapshot management
             void update_snapshot_internal(EngineId engine_id) const noexcept;
@@ -363,17 +368,28 @@ namespace backtest
 
             alignas(engine::CACHE_LINE) std::atomic<bool> event_management_thread_running_{false}; // Event management thread control
             std::thread event_management_thread_; // Event management thread (drains log + record buffers)
-            static constexpr std::size_t LOG_BUFFER_CAPACITY = 65536;
-            static constexpr std::size_t RECORD_BUFFER_CAPACITY = 65536;
             static constexpr std::size_t USER_ORDERS_PER_USER_BASE_CAPACITY = 4096;
-            using RecordItem = std::pair<EngineId, stream::L2Update>;
-            DoubleBuffer<std::string> log_buffer_;
-            DoubleBuffer<RecordItem> record_buffer_;
 
-            // Per-engine recording state (grown in register_stock; unique_ptr for atomic non-copyability)
-            std::vector<std::unique_ptr<std::atomic<bool>>> record_enabled_;
-            std::vector<std::string> record_path_override_;
-            std::unordered_map<EngineId, std::unique_ptr<stream::L2Stream>> record_streams_; // Lazy-open in event management thread
+            // Event path: buffers and streams used by event management thread (cache-line aligned)
+            using RecordItem = std::pair<EngineId, stream::L2Update>;
+            using FeaturesItem = std::pair<EngineId, FeaturesRecord>;
+            struct alignas(engine::CACHE_LINE) EngineRuntimeEventPath
+            {
+                static constexpr std::size_t LOG_BUFFER_CAPACITY = 65536;
+                static constexpr std::size_t RECORD_BUFFER_CAPACITY = 65536;
+                static constexpr std::size_t FEATURES_BUFFER_CAPACITY = 65536;
+                DoubleBuffer<std::string> log_buffer_;
+                DoubleBuffer<RecordItem> record_buffer_;
+                DoubleBuffer<FeaturesItem> features_buffer_;
+                std::unordered_map<EngineId, std::unique_ptr<stream::L2Stream>> record_streams_;
+                std::unordered_map<EngineId, std::unique_ptr<std::ofstream>> features_streams_;
+                EngineRuntimeEventPath()
+                    : log_buffer_(LOG_BUFFER_CAPACITY)
+                    , record_buffer_(RECORD_BUFFER_CAPACITY)
+                    , features_buffer_(FEATURES_BUFFER_CAPACITY)
+                {}
+            };
+            EngineRuntimeEventPath event_path_;
 
             UserAPI sync_order_api_;
         };
